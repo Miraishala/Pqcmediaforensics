@@ -1,0 +1,34 @@
+[workspace]
+authors = ["ncmurali <muraliyaswanth11@gmail.com>"]
+channels = ["conda-forge"]
+name = "evseal"
+platforms = ["win-64", "linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "3.12.*"
+ffmpeg = ">=9.0.2,<10"
+cmake = ">=4.4.4,<5"
+
+[pypi-dependencies]
+cryptography = ">=50.0.2, <51"
+typer = ">=0.27.2, <0.28"
+fastapi = ">=0.142.2, <0.143"
+uvicorn = { version = ">=0.54.0, <0.55", extras = ["standard"] }
+zfec = ">=1.6.0.0, <2"
+liboqs-python = ">=0.16.0.1, <0.17"
+dilithium-py = ">=1.4.0, <2"
+kyber-py = ">=1.2.0, <2"
+evseal = { path = ".", editable = true }
+
+[feature.dev.pypi-dependencies]
+pytest = "*"
+hypothesis = "*"
+
+[feature.dev.target.linux-64.pypi-dependencies]
+atheris = "*"
+
+[environments]
+dev = ["dev"]

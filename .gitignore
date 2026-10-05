@@ -11,3 +11,6 @@ __pycache__/
 dist/
 build/
 node_modules/
+# pixi environments
+.pixi/*
+!.pixi/config.toml

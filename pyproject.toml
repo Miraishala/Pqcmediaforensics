@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "evseal"
+version = "0.1.0"
+description = "EviSeal — post-quantum sealed video evidence tool"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "cryptography",
+    "typer",
+    "fastapi",
+    "uvicorn[standard]",
+    "zfec",
+]
+
+[project.scripts]
+evseal = "evseal.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["evseal"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: stress/benchmark tests not run by default CI",
+]
