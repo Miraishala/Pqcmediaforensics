@@ -1,0 +1,13 @@
+.pixi/
+__pycache__/
+*.pyc
+*.evseal
+*.key
+*.pem
+/bundles/
+/.benchmarks/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+node_modules/
