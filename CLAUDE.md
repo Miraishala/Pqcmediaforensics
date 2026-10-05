@@ -12,6 +12,8 @@ Read `SPEC.md` before doing anything. It is the source of truth.
   - checkpoints, final seal, key rotation, gap records
 
   If something seems wrong, stop and propose the change. Never change it silently.
+- **The protocol is unit-agnostic.** Video/audio time segments and image ordered sets both go through the same `R_i`/`C_i`/signature/verify-to-open/RS/checkpoint machinery. Format-specific logic (segmentation, ordering, tile extraction) lives in `evseal/media/*.py`, never inside `core/`.
+- **`core/verify.py` has zero UI/API imports.** It is the standalone reference verifier (SPEC §10, `evseal-verify`) — API and UI call into it, never the reverse.
 - **§10 and §11 are part of the requirements.** §10 lists requirements recovered from the design chat. §11 lists rejected alternatives; don't re-propose them without a new reason.
 - **Fail closed.** Any failed or skipped check means not `VERIFIED`. There is no "unsigned but OK" path.
 - **Every tunable lives in the profile (§4).** No algorithm name or size is hardcoded outside `core/crypto.py`'s registry.
@@ -37,5 +39,8 @@ The CLI is `evseal` (typer). `evseal doctor` checks the environment: liboqs algo
 
 ## Environment notes
 
+- **WSL2 (Ubuntu) is the primary dev/benchmark environment.** Build liboqs natively there for real ML-DSA, SLH-DSA, ML-KEM. Benchmarks and anything sealing real evidence run there, never on the pure-Python fallback.
+- **Native Windows remains supported for UI development** (P4) — it does not need a working native liboqs.
 - `liboqs-python` needs the liboqs shared library. Build it from source with cmake, and fail with a clear message if it is missing.
-- Develop cross-platform (Windows + Linux).
+- **Pure-Python fallback (`dilithium-py`, `kyber-py`) is DEV-ONLY** — `evseal doctor` must label it as such. It is slow and not timing-hardened: never benchmark against it, never seal real evidence with it.
+- Develop cross-platform (Windows + Linux/WSL2).

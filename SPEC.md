@@ -1,25 +1,27 @@
-# EviSeal — Post-Quantum Sealed Video Evidence
+# EviSeal — Post-Quantum Sealed Multimedia Evidence
 
 Build spec v0.1 · working name, rename freely
 
 ## 1. Goal
 
-A tool that seals video evidence in short segments so that:
+A tool that seals multimedia evidence — video, audio, and images — in **units** so that:
 
-1. Any edit, deletion, insertion or reordering is **detected and localized** to the segment.
-2. A **clip** (e.g. 40 s out of 12 h) verifies on its own, without the source footage.
-3. Sealed data **cannot be played without passing verification** (verify-to-open).
+1. Any edit, deletion, insertion or reordering is **detected and localized** to the unit (a time segment for video/audio, one image within an ordered set for photos).
+2. A **clip** (timed media) or a **sub-range of an image set** verifies on its own, without the rest of the source.
+3. Sealed data **cannot be played or opened without passing verification** (verify-to-open).
 4. Corruption is **repaired** from parity (RAID-6/ZFS style), and **reported separately from tampering**.
-5. Evidence stays verifiable for **decades**: post-quantum signatures, timestamps, re-sealing.
+5. Within an image (and later a video frame), edits are **localized to the affected tiles** (§2.5).
+6. Evidence stays verifiable for **decades**: post-quantum signatures, timestamps, re-sealing.
 
-**First target: Mode A.** Seal footage at the moment of collection, from any DVR/NVR export.
+**First target: Mode A, video + audio.** Seal footage/audio at the moment of collection, from any DVR/NVR export or a standalone recording. Images (Mode A) follow immediately after, in P1b.
 - Mode B (seal on the NVR as it writes) and Mode C (seal on the camera) come later.
 - The architecture must allow streaming input so Mode B is a drop-in later.
 
-**Positioning.** Axis Signed Video and ONVIF Media Signing already sign per GOP, using classical crypto in SEI frames. Post-quantum signed video has also been presented. Our novelty is the evidence workflow:
+**Positioning.** Axis Signed Video and ONVIF Media Signing already sign per GOP, using classical crypto in SEI frames; C2PA does the analogous thing for images, also classical. Post-quantum signed video has also been presented. Our novelty is the evidence workflow:
 - legacy DVR coverage (Mode A)
-- strip-proof verify-to-open sealing
-- standalone clips (redaction comes later)
+- strip-proof verify-to-open sealing, across video, audio and images
+- standalone clips / sub-ranges (redaction comes later)
+- within-unit tile localization for images (video frames later)
 - corruption repair
 - decades-long validity
 - disaster-recovery profile
@@ -30,24 +32,36 @@ A tool that seals video evidence in short segments so that:
 
 | Symbol | Meaning |
 |---|---|
-| `S_i` | bytes of segment *i* (see §9.1 for segmentation) |
-| `R_i` | content hash of `S_i` = `H1(S_i) ‖ H2(S_i)` (default SHA-256 ‖ SHA3-256) |
+| `S_i` | bytes of unit *i* (see §9.1 for segmentation/ordering) |
+| `R_i` | content hash of `S_i` = `H1(S_i) ‖ H2(S_i)` (default SHA-256 ‖ SHA3-256); for a **tiled** unit (images, later video frames) `R_i` is a Merkle root over tile leaves plus the whole-unit dual hash — see §2.5 |
 | `C_i` | chain value |
 | `rid` | random 256-bit recording id |
 | `Hc` | chain hash (default SHA3-256) |
 
+### Unit types
+
+The protocol is unit-agnostic: `R_i`, `C_i`, signatures, verify-to-open, RS parity and checkpoints are identical regardless of what a unit is.
+
+| Media | Unit | Order |
+|---|---|---|
+| Video, audio, AV (timed media) | one time segment (`segment.duration_s` / `audio.segment_duration_s`) | capture time (stream position) |
+| Images | one image | capture time, then filename (`image.set_order`) — proves no photo was removed, inserted or reordered |
+
+- **Standalone audio** (call recordings, sting audio, voice notes) uses the same packet-based segmentation as video.
+- **Audio inside an AV file** is already covered by that file's byte-range units — no separate handling needed.
+
 ### Sealing
 
-Steps for each segment *i*:
+Steps for each unit *i*:
 
 1. `R_i = H1(S_i) ‖ H2(S_i)`
 2. `C_0 = Hc("evseal-v1" ‖ rid ‖ profile_hash)`; `C_i = Hc(i ‖ R_i ‖ C_{i-1})`
-3. **Signed block** every `N` segments (`sign.block_segments`, default 1):
+3. **Signed block** every `N` units (`sign.block_segments`, default 1):
    `σ = Sign_eph(rid ‖ i_start ‖ i_end ‖ [R_i…] ‖ [C_i…])`.
-   Every `R_i` and `C_i` is stored and covered by a signature. A damaged segment therefore never breaks verification of later segments, because the chain is checked against *signed* `C_{i-1}` and is never recomputed across damage.
+   Every `R_i` and `C_i` is stored and covered by a signature. A damaged unit therefore never breaks verification of later units, because the chain is checked against *signed* `C_{i-1}` and is never recomputed across damage.
 4. **Verify-to-open sealing (key idea).**
-   - `(K_i, n_i) = HKDF(ikm=C_i, salt=rid, info="evseal-seg" ‖ i)`
-   - `E_i = AEAD(K_i, n_i, S_i, aad = rid ‖ i)`
+   - `(K_i, n_i) = HKDF(ikm=C_i, salt=rid, info="evseal-unit" ‖ i)`
+   - `E_i = AEAD(K_i, n_i, S_i, aad = rid ‖ i)` — for a tiled unit, applied per AEAD chunk (`image.aead_chunk_kb`), not the whole image at once (§2.5).
    - The key is derivable only from the *signed* chain value, so data can't be opened without first verifying.
    - This is **not confidentiality**: `C_i` is in the manifest. Confidentiality comes from the outer layer (§3.3).
    - The opaque bytes also stop platforms from re-encoding.
@@ -58,15 +72,15 @@ Steps for each segment *i*:
    - A long-term collector/device key certifies an ephemeral signing key for each `keys.rotation_s` period.
    - The ephemeral private key is securely deleted at period end (forward security).
    - Certificates are stored in the manifest.
-8. **Gap records.** Unreadable or dropped input produces a signed `GAP(i_start, i_end, reason)` record. A gap is evidence, not silence.
+8. **Gap records.** Unreadable or dropped input produces a signed `GAP(i_start, i_end, reason)` record. A gap is evidence, not silence. For an image set, a gap means a signed record that an expected index (by capture time or filename sequence) was never ingested.
 
-Stage 1 (hashing) and stage 3 (signing + encryption) run in parallel. Only the chain fold is sequential, and it costs about 64 bytes of hashing per segment.
+Stage 1 (hashing) and stage 3 (signing + encryption) run in parallel. Only the chain fold is sequential, and it costs about 64 bytes of hashing per unit.
 
 ### Verification and opening order (fail closed)
 
 1. Validate the certificate chain and algorithm policy. Reject any algorithm not on the verifier's allow-list. The profile is inside the signed manifest, so downgrade attempts are caught.
 2. Verify the block signatures, checkpoints, timestamps and final seal.
-3. For each segment:
+3. For each unit:
    1. Derive `K_i` from the signed `C_i`.
    2. AEAD-decrypt.
    3. Recompute `R_i`.
@@ -83,12 +97,12 @@ Stage 1 (hashing) and stage 3 (signing + encryption) run in parallel. Only the c
 | `GAP_DECLARED` | signed gap record | documented loss |
 | `UNSEALED_TAIL` | after last checkpoint, no final seal | truncation risk |
 
-A recording is `VERIFIED` overall only if every segment is `VERIFIED` or `REPAIRED`. Otherwise the report lists exactly which segments failed and why.
+A recording (or image set) is `VERIFIED` overall only if every unit is `VERIFIED` or `REPAIRED`. Otherwise the report lists exactly which units failed and why. For a tiled unit, see §2.5 for the finer-grained per-tile status.
 
 ### Clip package
 
-A clip contains:
-- segments `i..j` (sealed)
+A clip (timed media) or a sub-range export (image set) contains:
+- units `i..j` (sealed)
 - signed `C_{i-1}`
 - the signed records covering `i..j`
 - the certificates
@@ -96,15 +110,44 @@ A clip contains:
 
 It verifies and opens with no access to the source.
 
+### Tile-level localization (images; video frames later)
+
+For a **tiled unit** (an image today; a video frame in a later phase), `R_i` is a **Merkle root over tile leaves** rather than a single whole-unit hash, with the whole-unit dual hash kept alongside it. Leaves are stored in the manifest so a verifier can recompute the root without the rest of the unit.
+
+**Tile content basis**, per format:
+- **JPEG:** quantized DCT coefficients per tile, read losslessly — the lossy IDCT step never runs during sealing or verification.
+- **PNG / TIFF / RAW:** raw pixels.
+- **HEIC:** decoded pixels (HEVC decoding is bit-exact, so this stays deterministic).
+- **EXIF/XMP:** separate metadata leaves, outside the pixel/coefficient tiles — a metadata-only edit never looks like a content edit, and metadata leaves are the natural redaction target.
+
+**Perceptual hash (signed, advisory only).** A signed perceptual hash is also stored per tile, used **only** on recompressed copies that fail the cryptographic check, to flag "likely edited regions + confidence" — **never** as a cryptographic verdict. A cryptographic `TAMPERED`/`VERIFIED` always takes precedence; perceptual hashing never downgrades a cryptographic `VERIFIED`.
+
+**Sealing.** Image bytes are sealed in AEAD chunks (`image.aead_chunk_kb`) with RS parity over those chunks, the same model as §3.1 — corruption within the parity budget is repaired silently; only damage beyond it is reported `CORRUPT`.
+
+**Per-tile verifier status:**
+
+| Status | Condition |
+|---|---|
+| `VERIFIED` | tile hash matches signed leaf |
+| `TAMPERED` | clean decode, tile hash mismatches signed leaf |
+| `CORRUPT` | decode errors spreading from a damage point, beyond the parity budget |
+| `LIKELY_EDITED` | perceptual-only signal on a recompressed copy; confidence score attached, never a substitute for the cryptographic statuses above |
+| `METADATA_CHANGED` | an EXIF/XMP leaf fails while every pixel/coefficient tile is `VERIFIED` |
+| `DERIVED_COPY` | whole-image hash differs, no signed derivation record (§10 reproducible transcoding) exists, but a crop/resize relationship is detected |
+
+**Verifier output:** a per-tile status map, plus a heatmap overlay image rendered from it.
+
+Build this module (`core/tilemerkle.py`) generically against a tile/leaf abstraction, not image-specific internals — video-frame redaction (§8 "Later") reuses it unchanged.
+
 ## 3. Resilience
 
 ### 3.1 Erasure coding (RAID-6 / ZFS model)
 
-- **Stripe** = `ec.k` sealed segments plus `ec.m` parity shards (zfec). Default is 10+2, about 20% overhead. Any `m` bad shards per stripe can be rebuilt.
+- **Stripe** = `ec.k` sealed units plus `ec.m` parity shards (zfec). Default is 10+2, about 20% overhead. Any `m` bad shards per stripe can be rebuilt.
 - **Signed `R_i` locate bad shards.** That makes faults *erasures*, so Reed–Solomon gets its full capacity of `m`, not `m/2`.
 - **Interleaving depth `ec.interleave`.** Stripe members are spread apart (`j, j+D, j+2D…`) so a burst (a bad disk region) hits each stripe at most once.
-- Segments have variable sizes. Pad each stripe to its longest member and record the true lengths.
-- A rebuilt segment is accepted **only** if it matches its signed `R_i`.
+- Units have variable sizes. Pad each stripe to its longest member and record the true lengths.
+- A rebuilt unit is accepted **only** if it matches its signed `R_i`.
 - **Overhead vs. industry baselines:** 3× replication +200% (rejected, too expensive); RAID-6 on an 8-disk NVR +33% (covers disk failure only — not silent bit-rot); Backblaze 17+3 ≈ +18%; Azure LRC 12+2+2 ≈ +33%. Our RS 10+2 (+20%) / 20+2 (+10%) is competitive, and unlike plain RAID it locates the bad segment via the signed `R_i` before repairing it. If the NVR already runs RAID 6, that covers disk failure; our parity targets bit-rot and export copies (USB, DVD) that have no RAID.
 
 ### 3.2 Manifest protection
@@ -133,8 +176,14 @@ All parameters live in a **profile** (TOML). The UI edits profiles. The profile 
 
 | Group | Key | Default | Options / range |
 |---|---|---|---|
-| Segmenting | `segment.duration_s` | 1 | 0.5–10; actual cuts land on keyframes, actual lengths recorded |
+| Video | `segment.duration_s` | 1 | 0.5–10; actual cuts land on keyframes, actual lengths recorded |
 | | `segment.mode` | byte-range | byte-range (bit-exact) · remux (see §9.1) |
+| Audio | `audio.segment_duration_s` | 1 | 0.5–10; independent of video's `segment.duration_s` |
+| Images | `image.set_order` | capture_time | capture_time · filename |
+| | `image.tile_px` | 64 | 16–512; ~2–3% overhead on a 12 MP JPEG at 64 px tiles, ~0.6% at 128 px |
+| | `image.perceptual_hash` | on, algorithm TBD | on/off + algorithm; advisory only (§2.5) — algorithm choice (e.g. pHash/PDQ) to confirm in the P1b spike |
+| | `image.aead_chunk_kb` | TBD | TBD — confirm in P1b spike |
+| Unit rules | `unit.container_map` | built-in defaults | maps container/format → unit type (video/audio/image); overridable |
 | Hashing | `hash.content` | [sha256, sha3-256] | any of sha256, sha512, sha3-256, sha3-512, blake2b; warn if only 1 family |
 | | `hash.chain` | sha3-256 | sha256, sha3-256, sha3-512 |
 | Signatures | `sign.alg` | ML-DSA-44 | ML-DSA-44/65/87, SLH-DSA-{SHA2,SHAKE}-{128,192,256}{s,f}, hybrid Ed25519+ML-DSA, Ed25519 (baseline only, flagged NON-PQ) |
@@ -179,12 +228,14 @@ Python 3.12, one package, and minimal dependencies.
 
 ```
 evseal/
-  core/        segment.py  hashing.py  chain.py  kdf.py  aead.py
+  core/        unit.py  hashing.py  chain.py  kdf.py  aead.py
+               tilemerkle.py  # generic tile-Merkle: images now, video frames later (§2.5)
                crypto.py      # registry: keygen/sign/verify/kem per alg name (liboqs + cryptography)
                manifest.py    # JSON, canonical (RFC 8785 JCS) bytes for signing
                seal.py        # 3-stage pipeline, ProcessPoolExecutor
-               verify.py      # returns Report{overall, per-segment statuses, evidence}
+               verify.py      # returns Report{overall, per-unit statuses, evidence}; NO UI/API imports — this IS evseal-verify (§10)
                clip.py  open.py
+  media/       video.py  audio.py  image.py   # format-specific unit extraction/ordering (§9.1), kept out of core/
   resilience/  ec.py (zfec + interleave)  repair.py
   longterm/    keys.py (root, ephemeral certs, rotation, secure delete)
                checkpoint.py  timestamps.py (RFC 3161 client + local test TSA)
@@ -202,10 +253,16 @@ tests/
 - A directory: `manifest.json`, `segments/000000.seg …`, `parity/`, `certs/`, `anchors/`, `custody.log`.
 - Or a single `.evseal` file (zip, stored mode) for transport.
 
+**Environment:**
+- **WSL2 (Ubuntu) is the primary dev/benchmark environment.** liboqs is built natively there (real ML-DSA, SLH-DSA, ML-KEM) — see CLAUDE.md environment notes.
+- **Native Windows remains supported for UI development** (P4) and does not need a working native liboqs.
+- The pure-Python fallback (`dilithium-py`, `kyber-py`) stays available everywhere and is marked **DEV-ONLY** by `evseal doctor`: never benchmark against it, never seal real evidence with it (§9.2).
+
 **Dependencies:**
 - `liboqs` + `liboqs-python` (ML-DSA, SLH-DSA, ML-KEM)
 - `cryptography` (AEAD, HKDF, Ed25519)
 - `zfec`
+- Image handling (candidates, to confirm in the P1b spike): `Pillow` (PNG/TIFF baseline), a losslessly-DCT-readable JPEG library, HEIC decode support, an EXIF/XMP reader, a perceptual-hash library
 - `typer`, `fastapi`, `uvicorn`
 - `pytest`, `hypothesis`, `atheris` (fuzzing)
 - `ffmpeg`/`ffprobe` on PATH
@@ -232,6 +289,7 @@ The stack is FastAPI + React (Vite) + Tailwind. Use one accent colour, light/dar
    - A **timeline strip**, one cell per segment, coloured by status, zoomable from 12 h down to 1 s.
    - Clicking a cell shows: hashes, signed record, key certificate, checkpoint, timestamp, and repair history.
    - Export the report as JSON (PDF court report later).
+   - For image sets: a filmstrip of the set (verified/tampered per photo) and, per photo, a toggleable tile-overlay heatmap; clicking a tile shows its hashes and status (§2.5).
 5. **Clip & Open.** Select a range on the timeline, export a standalone clip, then open it to the restored file plus a playable preview.
 6. **Repair.** Show damaged segments with their stripes and a repair plan, run the repair, then re-verify.
 7. **Stress Lab.**
@@ -267,6 +325,11 @@ Each scenario has an **expected verdict** in `stresslab/expected.toml`. A mismat
 | 13 | backdated timestamp outside key validity | flag |
 | 14 | clip with forged boundary `C_{i-1}` | fail |
 
+**Audio-specific attacks** (standalone audio units):
+- splice in 1 s of audio from another recording → `TAMPERED` / `SEQUENCE_ERROR` at that unit
+- delete 1 s from inside a call recording → `SEQUENCE_ERROR` at the gap
+- reorder audio units → `SEQUENCE_ERROR`
+
 **C. Faults**
 - random bit-rot at 1e-9 to 1e-5
 - bursts of length L for several interleave depths D
@@ -286,6 +349,16 @@ Each scenario has an **expected verdict** in `stresslab/expected.toml`. A mismat
 - Sweeps over §4 parameters. Measure throughput, CPU, RAM and overhead %, and compare against the §4 reference estimates.
 - Raspberry Pi 4 run later.
 
+**G. Image sets & tile localization** (expected verdicts in `stresslab/expected.toml`, same discipline as A–C)
+- remove / insert / reorder a photo in the set → `SEQUENCE_ERROR` at that index; swap in a photo from elsewhere → `TAMPERED` or `SEQUENCE_ERROR`
+- inpaint or paste a region → only those tiles `TAMPERED`
+- single-pixel (raw) or single-coefficient (JPEG) change → exactly 1 tile `TAMPERED`
+- EXIF-only edit → `METADATA_CHANGED`, all pixel/coefficient tiles `VERIFIED`
+- bit-flip within the parity budget → `REPAIRED`; beyond it → `CORRUPT`
+- recompressed, otherwise-unedited copy → no tile above the `LIKELY_EDITED` threshold
+- recompressed **and** edited copy → the edited region's tiles flagged `LIKELY_EDITED`
+- crop or resize → `DERIVED_COPY`
+
 CI runs A, B and a fast subset of C and D. The full matrix runs from Stress Lab or `evseal stress --full`.
 
 ## 8. Build phases
@@ -295,7 +368,8 @@ For every phase: plan, get approval, implement, get tests green, then write a sh
 | Phase | Scope | Done when |
 |---|---|---|
 | P0 | Environment: liboqs build, deps, ffmpeg check, `evseal doctor` command | doctor lists ML-DSA, SLH-DSA, ML-KEM available |
-| P1 | Spike §9.1 on MP4, TS, raw H.264 and one DVR proprietary sample; core seal/verify/open/clip CLI; manifest; profiles | tests A + attacks 1–8 pass |
+| P1 | Spike §9.1 on MP4 (moov-at-end + faststart + fragmented), raw H.264/H.265, TS, AV-with-audio, and standalone audio (WAV/MP3/AAC-M4A/Opus); cut at packet boundaries of *all* streams; core seal/verify/open/clip CLI; manifest; profiles; single static collector key + final seal (rotation/checkpoints stay P3) | tests A + attacks 1–8 pass, incl. audio attacks, for every spike format. DVR proprietary sample stays an open item. |
+| P1b | Images: ordered sets, tile-Merkle localization (§2.5), perceptual-hash advisory layer, per-tile AEAD+RS | image test matrix (§7G) passes; `expected.toml` covers every listed scenario |
 | P2 | Erasure coding, interleave, manifest protection, repair, corruption-vs-tamper classification | fault tests C pass, including m vs m+1 |
 | P3 | Key rotation, checkpoints, RFC 3161 + local TSA, anchor log, final seal, reseal | attacks 9–14 pass |
 | P4 | API + UI: Profiles, Keys, Seal, Verify timeline, Clip & Open, Repair | full flow usable from UI |
@@ -303,7 +377,7 @@ For every phase: plan, get approval, implement, get tests green, then write a sh
 | P6 | DR profile: ML-KEM outer layer, k-of-n geo-split, custody log | site-loss tests pass |
 
 **Later:**
-- tile-level redaction proofs (Merkle over tiles inside each segment)
+- video-frame tile localization, reusing `core/tilemerkle.py` built generically in P1b
 - court verification report (Section 63 BSA annexure)
 - Mode B NVR live ingest
 - ultra-light camera mode (hash + chain + ratcheting HMAC on device, PQ signing at gateway)
@@ -315,9 +389,12 @@ For every phase: plan, get approval, implement, get tests green, then write a sh
 ### 9.1 Segmentation vs bit-exact restore (decide in the P1 spike)
 
 The key idea requires that opening restores the original file. Recommended default:
-- **Byte-range segments of the original file**, cut at packet boundaries found with `ffprobe -show_packets` (pos + pts), targeting `segment.duration_s`. Concatenating the opened segments gives the bit-exact original.
+- **Byte-range units of the original file**, cut at packet boundaries of *all* streams (not just video keyframes), sorted by byte position, found with `ffprobe -show_packets` (pos + pts), targeting `segment.duration_s` (video/AV) or `audio.segment_duration_s` (standalone audio). Concatenating the opened units gives the bit-exact original.
+- **Formats to spike on:** MP4 (moov-at-end and faststart), fragmented MP4, raw H.264, H.265, TS, AV files with an audio track, and audio-only files (WAV, MP3, AAC/M4A, Opus). The DVR proprietary sample stays an open item — none available yet, don't block P1 on it.
 - **Container header/index chunks** (e.g. MP4 `ftyp`/`moov`) are flagged and included in every clip, so a clip can be remuxed for playback.
 - **Fallback `remux` mode:** stream-copy into independent TS segments. Frames stay bit-identical but the container is new. The whole original file's hash is still sealed in the final seal.
+
+Images use ordering, not byte-range cutting — see §2 "Unit types" and §2.5.
 
 ### 9.2 Known limits
 
@@ -326,6 +403,8 @@ The key idea requires that opening restores the original file. Recommended defau
 - **Segment length follows the camera's GOP.** Long-GOP cameras give longer segments.
 - **liboqs is a research library.** Swap in validated implementations via the crypto registry when available.
 - **Dev private keys are file-based.** HSM/TPM support comes later.
+- **Perceptual hashing (§2.5) is advisory only**, never a cryptographic verdict, and the algorithm/threshold choice is unconfirmed pending the P1b spike.
+- **`DERIVED_COPY` detection is heuristic** (crop/resize relationship) until a signed derivation record exists (§10 reproducible transcoding) to confirm it deterministically.
 
 ## 10. Requirements recovered from the design discussion
 
@@ -378,7 +457,7 @@ Don't re-propose these without a new reason.
 
 **Prior art to position against:**
 - Axis Signed Video (2021, open source) and ONVIF Media Signing (final spec expected end-2026) — classical, per-GOP signatures in SEI frames; Axis's own documentation acknowledges that dropping SEI frames silently strips the signature
-- C2PA (classical; ML-DSA C2PA-style packages exist)
+- C2PA (images; classical provenance standard — ML-DSA C2PA-style packages exist)
 - PKI Consortium PQC Conference 2025 talk on PQ-signed video
 - Ampex 2026 video attestation paper
 - PQ evidence-layer / audit-log papers (2025)
@@ -396,6 +475,8 @@ Don't re-propose these without a new reason.
 - Decades-long validity: checkpoints, rotation, re-sealing
 - Government DR profile
 - Measured overheads and stress results
+- A single unit-agnostic protocol across **video, audio and images**
+- **Per-tile localization within a unit** (images now, video frames later) combining cryptographic and advisory-perceptual evidence
 
 **India context:** DST PQC migration roadmap — critical information infrastructure by 2029, broader adoption by 2033, cryptographic asset inventory and risk assessment due by end of 2026. CERT-In CBOM/QBOM guidelines (July 2025), BSA Section 63 certificates.
 
