@@ -483,6 +483,110 @@ def attacks():
     return {"attacks": [a for a in describe() if a["name"] not in ("attacker_reseal", "forge_with_leaked_key", "swap_foreign")]}
 
 
+# ---- Stress Lab, Benchmarks & DR ----
+
+
+@app.get("/api/stress/scenarios")
+def stress_scenarios():
+    from evseal.stresslab.runner import load_expected
+
+    scs = load_expected()
+    return {"scenarios": [
+        {
+            "id": s["id"],
+            "title": s.get("title", ""),
+            "kind": s.get("kind", "bundle"),
+            "slow": bool(s.get("slow", False)),
+            "media": s.get("media", ""),
+            "attack": s.get("attack", ""),
+            "expected": {k: s[k] for k in ("overall", "affected", "others", "verdict", "tail", "head") if k in s},
+        }
+        for s in scs
+    ]}
+
+
+class StressRunBody(BaseModel):
+    ids: list[str] | None = None
+    seed: int = 1
+    full: bool = False
+
+
+@app.post("/api/stress/run")
+def stress_run(body: StressRunBody):
+    import tempfile
+    from evseal.stresslab.runner import run_matrix
+
+    with tempfile.TemporaryDirectory() as td:
+        results = run_matrix(Path(td), ids=body.ids, seed=body.seed, full=body.full)
+    passed = sum(1 for r in results if r["pass"])
+    return {
+        "results": results,
+        "seed": body.seed,
+        "total": len(results),
+        "passed": passed,
+        "failed": len(results) - passed,
+    }
+
+
+class BenchRunBody(BaseModel):
+    quick: bool = True
+    workers: int | None = None
+
+
+_latest_bench: list[dict] = []
+
+
+@app.post("/api/bench/run")
+def bench_run(body: BenchRunBody):
+    global _latest_bench
+    from evseal.bench.sweep import run_sweep
+
+    _latest_bench = run_sweep(quick=body.quick, workers=body.workers)
+    return {"results": _latest_bench}
+
+
+@app.get("/api/bench/results")
+def bench_results():
+    return {"results": _latest_bench}
+
+
+class DrSplitBody(BaseModel):
+    k: int = 2
+    n: int = 3
+
+
+@app.post("/api/bundles/{name}/dr/split")
+def bundle_dr_split(name: str, body: DrSplitBody):
+    from evseal.dr.split import split_bundle
+
+    b = _bundle(name)
+    keys = [k for k in WS.list_keys() if k["has_private"]]
+    actor = WS.root(keys[0]["name"]) if keys else None
+    out_dir = WS.home / "dr_shards" / _safe(name)
+    shards = split_bundle(b, k=body.k, n=body.n, out_dir=out_dir, actor=actor)
+    return {"bundle": name, "k": body.k, "n": body.n, "shards": [s.name for s in shards]}
+
+
+class DrRecoverBody(BaseModel):
+    shards_bundle: str
+    out_name: str
+
+
+@app.post("/api/dr/recover")
+def bundle_dr_recover(body: DrRecoverBody):
+    from evseal.dr.split import recover_bundle
+
+    shards_dir = WS.home / "dr_shards" / _safe(body.shards_bundle)
+    if not shards_dir.is_dir():
+        raise HTTPException(404, "no shards found for bundle")
+    keys = [k for k in WS.list_keys() if k["has_private"]]
+    actor = WS.root(keys[0]["name"]) if keys else None
+    out_bundle = WS.home / "bundles" / _safe(body.out_name)
+    recover_bundle(shards_dir, out_bundle, actor=actor)
+    _cache.pop(body.out_name, None)
+    return {"bundle": body.out_name, "report": _verify(body.out_name, force=True)[0]}
+
+
 _UI = Path(__file__).resolve().parent.parent / "ui" / "dist"
 if _UI.is_dir():
     app.mount("/", StaticFiles(directory=_UI, html=True), name="ui")

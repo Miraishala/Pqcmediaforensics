@@ -99,3 +99,25 @@ The following were implemented without explicit protocol approval. Proposed as a
 
 *These are tracked here to avoid silent protocol drift. None of these change the core §2
 chain/signing/AEAD/RS mechanics.*
+
+---
+
+## P5, P6, and §10 Implementation Status (All Green)
+
+- **P6 Disaster Recovery Profile (§3.3):**
+  - Implemented `evseal/dr/outer.py`: random DEK wrapped to custodian ML-KEM keys (ML-KEM-768/1024), bundle encrypted with AES-256-GCM.
+  - Implemented `evseal/dr/split.py`: $k$-of-$n$ geo-split shards via `zfec.easyfec` with tamper detection and integrity verification against untrusted sites.
+  - Chained custody log updates on DR split and recover.
+  - Verified with 7 comprehensive tests in `tests/test_dr.py`.
+- **P5 Stress Lab, Benchmarks & Fuzzing (SPEC §6, §7):**
+  - Implemented `evseal/bench/sweep.py` parameter sweeps (throughput, wall time, CPU time, RAM, and overhead %).
+  - Implemented Atheris fuzzing harness `tests/fuzz/fuzz_manifest.py` and `tests/test_fuzz.py`.
+  - Added UI pages `evseal/ui/src/pages/StressLab.jsx` and `evseal/ui/src/pages/Benchmarks.jsx`.
+  - Added FastAPI endpoints in `evseal/api/app.py` for `/api/stress/*`, `/api/bench/*`, and `/api/dr/*`.
+  - Rebuilt production UI with Vite into `evseal/ui/dist`.
+- **§10 Reproducible Transcoding:**
+  - Implemented `evseal/media/transcode.py`: deterministic x264 transcode with ffmpeg, signed derivation records, and bit-exact verifier.
+  - Verified with `tests/test_transcode.py`.
+- **End-to-End Testing from Live UI / API:**
+  - `tests/test_e2e_api.py`: 11 live HTTP end-to-end integration tests covering Doctor -> Keygen -> Profile -> Upload -> Seal (SSE) -> Verify -> Clip & Open -> Tamper & Repair -> DR Split & Recover -> Stress Lab -> Benchmarks -> Static UI.
+  - Entire test suite: **146 passed, 0 failures, 2 skipped** (144 fast + 2 slow).

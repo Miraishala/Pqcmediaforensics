@@ -247,6 +247,101 @@ def pack(bundle: str, out: str):
     typer.echo(_pack(Path(bundle), Path(out)))
 
 
+@app.command("dr-split")
+def dr_split(bundle: str, out_dir: str, k: int = typer.Option(2, help="threshold fragments"), n: int = typer.Option(3, help="total fragments"),
+             key: str = typer.Option(None, help="signing key for custody log"), home: str = HomeOpt):
+    """Split a bundle directory or archive into n geo-redundant shards (threshold k)."""
+    from evseal.dr.split import split_bundle
+
+    ws = _ws(home)
+    actor = ws.root(key) if key else None
+    shards = split_bundle(Path(bundle), k=k, n=n, out_dir=Path(out_dir), actor=actor)
+    typer.echo(f"split {bundle} into {len(shards)} shards (k={k}, n={n}) -> {out_dir}")
+
+
+@app.command("dr-recover")
+def dr_recover(out: str, shards: list[str] = typer.Argument(..., help="shard files or shard directory"),
+               key: str = typer.Option(None, help="signing key for custody log"), home: str = HomeOpt):
+    """Recover bundle from at least k geo-redundant shards."""
+    from evseal.dr.split import recover_bundle
+
+    ws = _ws(home)
+    actor = ws.root(key) if key else None
+    input_shards = Path(shards[0]) if len(shards) == 1 and Path(shards[0]).is_dir() else [Path(s) for s in shards]
+    recovered = recover_bundle(input_shards, Path(out), actor=actor)
+    typer.echo(f"recovered bundle -> {recovered}")
+
+
+@app.command("dr-wrap")
+def dr_wrap(bundle: str, out: str, custodian_pk: list[str] = typer.Option(..., help="custodian key file or id:hex"),
+            kem_alg: str = "ML-KEM-768"):
+    """Encrypt bundle with outer ML-KEM layer for custodian confidentiality."""
+    import json
+    from evseal.dr.outer import encrypt_outer
+
+    custodians = []
+    for c in custodian_pk:
+        if Path(c).is_file():
+            custodians.append(json.loads(Path(c).read_text()))
+        elif ":" in c:
+            cid, pk_hex = c.split(":", 1)
+            custodians.append({"id": cid, "pk": pk_hex, "alg": kem_alg})
+        else:
+            raise ValueError(f"invalid custodian specification: {c}")
+    encrypt_outer(Path(bundle), custodians, Path(out), kem_alg=kem_alg)
+    typer.echo(f"outer encrypted -> {out}")
+
+
+@app.command("dr-unwrap")
+def dr_unwrap(outer_file: str, out: str, custodian_id: str = typer.Option(..., "--id"),
+              key: str = typer.Option(..., "--key", help="custodian private key JSON file or hex")):
+    """Decrypt outer ML-KEM encrypted bundle container."""
+    import json
+    from evseal.dr.outer import decrypt_outer
+
+    sk = json.loads(Path(key).read_text())["sk"] if Path(key).is_file() else key
+    decrypt_outer(Path(outer_file), custodian_id, sk, Path(out))
+    typer.echo(f"outer decrypted -> {out}")
+
+
+@app.command()
+def stress(scenario: str = typer.Option(None, help="specific scenario ID to run"),
+           full: bool = typer.Option(False, "--full", help="run full matrix including slow"), seed: int = 1):
+    """Run Stress Lab scenario matrix against expected results."""
+    import tempfile
+    from evseal.stresslab.runner import run_matrix
+
+    with tempfile.TemporaryDirectory() as td:
+        ids = [scenario] if scenario else None
+        results = run_matrix(Path(td), ids=ids, seed=seed, full=full)
+        passed = sum(1 for r in results if r["pass"])
+        failed = len(results) - passed
+        for r in results:
+            mark = "PASS" if r["pass"] else "FAIL"
+            typer.echo(f"[{mark}] {r['id']:<35} ({r['seconds']}s)")
+            for m in r.get("mismatches", []):
+                typer.echo(f"       ! {m}")
+        typer.echo(f"\nTotal: {passed} passed, {failed} failed out of {len(results)} scenarios (seed={seed})")
+        if failed > 0:
+            raise typer.Exit(1)
+
+
+@app.command()
+def bench(quick: bool = typer.Option(True, "--quick/--full", help="quick sweep vs full parameter grid"),
+          workers: int = typer.Option(None, help="worker processes"),
+          json_out: str = typer.Option(None, "--json", help="export JSON metrics")):
+    """Run parameter sweep benchmarks measuring throughput, RAM, and overhead."""
+    from evseal.bench.sweep import run_sweep
+
+    results = run_sweep(quick=quick, workers=workers, out_file=Path(json_out) if json_out else None)
+    header = f"{'Configuration':<44} {'Overhead':<10} {'Throughput':<12} {'RAM':<8} {'Status'}"
+    typer.echo(header)
+    typer.echo("-" * len(header))
+    for r in results:
+        status = "OK" if r["verified"] else "FAIL"
+        typer.echo(f"{r['label']:<44} {r['overhead_pct']:>6.1f}%    {r['throughput_mb_s']:>6.1f} MB/s   {r['peak_ram_mb']:>5.1f}MB  [{status}]")
+
+
 @app.command()
 def serve(host: str = "127.0.0.1", port: int = 8000):
     """Run the API + UI."""

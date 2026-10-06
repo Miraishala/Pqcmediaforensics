@@ -5,6 +5,8 @@ import Seal from './pages/Seal.jsx'
 import Verify from './pages/Verify.jsx'
 import ClipOpen from './pages/ClipOpen.jsx'
 import Repair from './pages/Repair.jsx'
+import StressLab from './pages/StressLab.jsx'
+import Benchmarks from './pages/Benchmarks.jsx'
 import Doctor from './pages/Doctor.jsx'
 
 const PAGES = [
@@ -12,6 +14,8 @@ const PAGES = [
   { id: 'verify', label: 'Verify', icon: '✓', C: Verify },
   { id: 'clip', label: 'Clip & Open', icon: '✂', C: ClipOpen },
   { id: 'repair', label: 'Repair', icon: '↻', C: Repair },
+  { id: 'stress', label: 'Stress Lab', icon: '⚡', C: StressLab },
+  { id: 'bench', label: 'Benchmarks', icon: '📊', C: Benchmarks },
   { id: 'profiles', label: 'Profiles', icon: '⚙', C: Profiles },
   { id: 'keys', label: 'Keys', icon: '⚿', C: Keys },
   { id: 'doctor', label: 'Environment', icon: '⌁', C: Doctor },
