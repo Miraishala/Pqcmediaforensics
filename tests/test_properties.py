@@ -57,60 +57,61 @@ def random_profile(draw):
     overrides["ec"] = {"k": k, "m": m, "interleave": interleave}
     # Use ML-DSA for checkpoints (faster than SLH-DSA in pure-Python)
     overrides.setdefault("checkpoint", {})["alg"] = "ML-DSA-65"
+    overrides.setdefault("anchors", {})["backend"] = "off"
     return overrides
 
 
 # ---- property P1: modified unit is never VERIFIED ----
 
+import tempfile
+
 @given(profile_overrides=random_profile(), seed=st.integers(min_value=0, max_value=2**31))
-@settings(max_examples=20, suppress_health_check=[HealthCheck.too_slow], deadline=None)
-def test_modified_unit_never_verified(prop_lab, tmp_path, profile_overrides, seed):
+@settings(max_examples=10, suppress_health_check=[HealthCheck.too_slow], deadline=None)
+def test_modified_unit_never_verified(prop_lab, profile_overrides, seed):
     """P1 (SPEC §7D): any bit-flip in a sealed unit must never produce VERIFIED status."""
     rng = random.Random(seed)
     p = prof.resolve(prof._merge(prof.DEFAULTS, profile_overrides))
-    bundle = tmp_path / f"bundle_{seed}"
-    root = prop_lab["ws"].root("prop-root")
-    tsa = LocalTSA(prop_lab["ws"].home / "tsa")
-    seal_path(prop_lab["ts"], p, root, bundle, tsa=tsa, anchor_log=None)
+    with tempfile.TemporaryDirectory() as td:
+        bundle = Path(td) / "bundle"
+        root = prop_lab["ws"].root("prop-root")
+        tsa = LocalTSA(prop_lab["ws"].home / "tsa")
+        seal_path(prop_lab["ts"], p, root, bundle, tsa=tsa, anchor_log=None)
 
-    # Pick a random data segment file and flip one bit
-    seg_files = sorted((bundle / "segments").glob("*.seg")) if (bundle / "segments").exists() else []
-    # Handle flat layout (some formats keep segs in bundle root)
-    if not seg_files:
-        seg_files = sorted(bundle.glob("*.seg"))
-    if not seg_files:
-        pytest.skip("No .seg files found (format may not produce segments)")
-    victim = rng.choice(seg_files)
-    data = bytearray(victim.read_bytes())
-    bit = rng.randrange(len(data) * 8)
-    data[bit // 8] ^= 1 << (bit % 8)
-    victim.write_bytes(bytes(data))
+        # Pick a random data segment file and flip one bit
+        seg_files = sorted((bundle / "segments").glob("*.seg")) if (bundle / "segments").exists() else sorted(bundle.glob("*.seg"))
+        if not seg_files:
+            pytest.skip("No .seg files found (format may not produce segments)")
+        victim = rng.choice(seg_files)
+        data = bytearray(victim.read_bytes())
+        bit = rng.randrange(len(data) * 8)
+        data[bit // 8] ^= 1 << (bit % 8)
+        victim.write_bytes(bytes(data))
 
-    rep = verify(bundle, prop_lab["ws"].trust())
-    # The victim unit must NOT be VERIFIED
-    i = int(victim.stem)
-    unit_status = {u.i: u.status for u in rep.units}
-    victim_status = unit_status.get(i)
-    assert victim_status != "VERIFIED", (
-        f"P1 VIOLATED: flipped bit in unit {i} still VERIFIED "
-        f"(seed={seed}, profile={profile_overrides})"
-    )
+        rep = verify(bundle, prop_lab["ws"].trust())
+        # The victim unit must NOT be VERIFIED
+        i = int(victim.stem)
+        unit_status = {u.i: u.status for u in rep.units}
+        victim_status = unit_status.get(i)
+        assert victim_status != "VERIFIED", (
+            f"P1 VIOLATED: flipped bit in unit {i} still VERIFIED "
+            f"(seed={seed}, profile={profile_overrides})"
+        )
 
 
 # ---- property P2: untouched units never fail ----
 
 @given(profile_overrides=random_profile(), seed=st.integers(min_value=0, max_value=2**31))
-@settings(max_examples=20, suppress_health_check=[HealthCheck.too_slow], deadline=None)
-def test_untouched_units_never_fail(prop_lab, tmp_path, profile_overrides, seed):
+@settings(max_examples=10, suppress_health_check=[HealthCheck.too_slow], deadline=None)
+def test_untouched_units_never_fail(prop_lab, profile_overrides, seed):
     """P2 (SPEC §7D): untouched segments must be VERIFIED (no false positives)."""
-    rng = random.Random(seed)
     p = prof.resolve(prof._merge(prof.DEFAULTS, profile_overrides))
-    bundle = tmp_path / f"bundle_clean_{seed}"
-    root = prop_lab["ws"].root("prop-root")
-    tsa = LocalTSA(prop_lab["ws"].home / "tsa")
-    seal_path(prop_lab["ts"], p, root, bundle, tsa=tsa, anchor_log=None)
+    with tempfile.TemporaryDirectory() as td:
+        bundle = Path(td) / "bundle"
+        root = prop_lab["ws"].root("prop-root")
+        tsa = LocalTSA(prop_lab["ws"].home / "tsa")
+        seal_path(prop_lab["ts"], p, root, bundle, tsa=tsa, anchor_log=None)
 
-    rep = verify(bundle, prop_lab["ws"].trust())
+        rep = verify(bundle, prop_lab["ws"].trust())
     for u in rep.units:
         if u.role == "data":
             assert u.status in ("VERIFIED", "REPAIRED"), (

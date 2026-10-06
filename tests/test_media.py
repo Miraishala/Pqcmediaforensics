@@ -76,7 +76,8 @@ def _seal_and_verify(lab, media_path: Path, tmp_path: Path, profile_overrides=No
     from evseal.core.seal import seal_path
     seal_path(media_path, p, root, bundle, tsa=tsa, anchor_log=lab["ws"].anchor_log())
     rep = verify(bundle, lab["ws"].trust())
-    return bundle, rep, _sha256(media_path)
+    sha = _sha256(media_path) if media_path.is_file() else ""
+    return bundle, rep, sha
 
 
 # ---- §7A: bit-exact round-trip for every spike format ----

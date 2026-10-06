@@ -107,8 +107,8 @@ def test_dual_hash_changes_on_edit():
 # ---- chain ----
 
 def test_chain_init_deterministic():
-    c1 = chain_init("evseal-v1", b"\x00" * 32, b"\x01" * 32, "sha3-256")
-    c2 = chain_init("evseal-v1", b"\x00" * 32, b"\x01" * 32, "sha3-256")
+    c1 = chain_init(b"\x00" * 32, b"\x01" * 32, "sha3-256")
+    c2 = chain_init(b"\x00" * 32, b"\x01" * 32, "sha3-256")
     assert c1 == c2
 
 

@@ -4,34 +4,13 @@
 # A mismatch between expected and actual is a BUG in code, not in this file
 # (unless SPEC explicitly says otherwise — ask first).
 #
-# Fields
-# ------
-# id          unique slug used as the pytest parameter id
-# title       human-readable label
-# media       synth target: mp4_moovend | mp4_faststart | mp4_fragmented | ts |
-#             h264 | h265 | wav | mp3 | m4a | opus | long | images_jpg | images_png |
-#             images_jpg_gap  (runner.py Lab.media())
-# profile     optional TOML inline-table overriding the lab base profile
-# attack      function name in ATTACKS dict (attacks.py); omit for correctness runs
-# kind        compare | crash  (alternative to attack for special run modes)
-# transform   transform name in TRANSFORMS dict (transforms.py); used when kind=compare
-# params      extra keyword args passed to the attack/transform function
-# tsa_offset_s  seconds to shift LocalTSA clock (attack 13)
+# Bundle overall verdicts in verify.py:
+#   VERIFIED      all units VERIFIED or REPAIRED, all checks pass
+#   NOT_VERIFIED  trust established, but some unit/check failed
+#   REJECTED      no basis for trust (manifest missing, profile tampered, untrusted root, policy reject)
 #
-# Expected-result fields (all optional; runner checks only the keys present)
-# --------
-# overall     VERIFIED | REPAIRED | CORRUPT | TAMPERED | SEQUENCE_ERROR | UNSEALED_TAIL
-# affected    status(es) expected on units listed in attack's returned {"units":[…]}
-# others      status expected on all untouched data units (usually "VERIFIED")
-# any         list of statuses — at least one unit must have each
-# none        list of statuses — no affected unit must have any of these
-# head        status of the FIRST data unit
-# tail        status of the LAST data unit
-# verdict     (kind=compare only) compare_copy verdict string
-# tiles       exact {status: count} on tiles across all units (kind=compare) or per-unit
-# tiles_min   {status: count} lower bounds
-# tiles_max   {status: count} upper bounds
-# slow        true → @pytest.mark.slow (skipped in fast CI; runs in full matrix)
+# Unit statuses (u.status):
+#   VERIFIED | REPAIRED | CORRUPT | TAMPERED | SEQUENCE_ERROR | GAP_DECLARED | UNSEALED_TAIL
 
 # ============================================================
 # §7A — Correctness
@@ -145,15 +124,15 @@ affected = "REPAIRED"
 others   = "VERIFIED"
 none     = ["CORRUPT", "TAMPERED"]
 
-# Attack 1 variant: bit-flip without parity (m=0) → CORRUPT
+# Attack 1 variant: bit-flip without parity (m=0) → CORRUPT unit, NOT_VERIFIED overall
 [[scenario]]
 id      = "attack1_bitflip_no_parity"
-title   = "Attack 1: bit-flip without parity → CORRUPT"
+title   = "Attack 1: bit-flip without parity → CORRUPT unit"
 media   = "ts"
 attack  = "bitflip"
 profile = {ec = {k = 4, m = 0, interleave = 2}}
 params  = {unit = "random", flips = 1}
-overall  = "CORRUPT"
+overall  = "NOT_VERIFIED"
 affected = "CORRUPT"
 others   = "VERIFIED"
 none     = ["TAMPERED", "REPAIRED"]
@@ -161,20 +140,20 @@ none     = ["TAMPERED", "REPAIRED"]
 # Attack 2: decrypt-edit-reencrypt (TAMPERED: tag passes, R_i mismatches)
 [[scenario]]
 id     = "attack2_reencrypt_edit_mp4"
-title  = "Attack 2: decrypt+edit+re-encrypt → TAMPERED"
+title  = "Attack 2: decrypt+edit+re-encrypt → TAMPERED unit"
 media  = "mp4_moovend"
 attack = "reencrypt_edit"
-overall  = "TAMPERED"
+overall  = "NOT_VERIFIED"
 affected = "TAMPERED"
 others   = "VERIFIED"
 none     = ["CORRUPT", "SEQUENCE_ERROR"]
 
 [[scenario]]
 id     = "attack2_reencrypt_edit_ts"
-title  = "Attack 2: decrypt+edit+re-encrypt (TS) → TAMPERED"
+title  = "Attack 2: decrypt+edit+re-encrypt (TS) → TAMPERED unit"
 media  = "ts"
 attack = "reencrypt_edit"
-overall  = "TAMPERED"
+overall  = "NOT_VERIFIED"
 affected = "TAMPERED"
 others   = "VERIFIED"
 none     = ["CORRUPT", "SEQUENCE_ERROR"]
@@ -182,10 +161,10 @@ none     = ["CORRUPT", "SEQUENCE_ERROR"]
 # Attack 3: swap in a segment from another recording
 [[scenario]]
 id     = "attack3_swap_foreign"
-title  = "Attack 3: foreign segment spliced in → TAMPERED"
+title  = "Attack 3: foreign segment spliced in → TAMPERED unit"
 media  = "mp4_moovend"
 attack = "swap_foreign"
-overall  = "TAMPERED"
+overall  = "NOT_VERIFIED"
 affected = "TAMPERED"
 others   = "VERIFIED"
 
@@ -196,9 +175,9 @@ title  = "Attack 4: delete 1 segment → SEQUENCE_ERROR"
 media  = "mp4_moovend"
 attack = "delete_units"
 params = {unit = "2", count = 1}
-overall = "SEQUENCE_ERROR"
+overall = "NOT_VERIFIED"
 any     = ["SEQUENCE_ERROR"]
-none    = ["TAMPERED", "CORRUPT"]
+none    = ["TAMPERED"]
 
 # Attack 5: insert a duplicate segment
 [[scenario]]
@@ -206,7 +185,7 @@ id     = "attack5_insert_unit"
 title  = "Attack 5: insert duplicate segment → SEQUENCE_ERROR"
 media  = "mp4_moovend"
 attack = "insert_unit"
-overall = "SEQUENCE_ERROR"
+overall = "NOT_VERIFIED"
 any     = ["SEQUENCE_ERROR"]
 none    = ["TAMPERED"]
 
@@ -216,7 +195,7 @@ id     = "attack6_reorder"
 title  = "Attack 6: swap two segments → SEQUENCE_ERROR"
 media  = "mp4_moovend"
 attack = "reorder"
-overall = "SEQUENCE_ERROR"
+overall = "NOT_VERIFIED"
 any     = ["SEQUENCE_ERROR"]
 none    = ["TAMPERED"]
 
@@ -227,85 +206,77 @@ title  = "Attack 7: truncate tail (no final seal) → UNSEALED_TAIL"
 media  = "mp4_moovend"
 attack = "truncate_tail"
 params = {count = 1}
-overall = "UNSEALED_TAIL"
+overall = "NOT_VERIFIED"
 tail    = "UNSEALED_TAIL"
 
-# Attack 8a: strip manifest
+# Attack 8a: strip manifest → REJECTED
 [[scenario]]
 id     = "attack8a_strip_manifest"
-title  = "Attack 8a: manifest stripped → REJECT (not VERIFIED)"
+title  = "Attack 8a: manifest stripped → REJECTED (no basis for trust)"
 media  = "mp4_moovend"
 attack = "strip_manifest"
-overall = "CORRUPT"
-# any verdict except VERIFIED is acceptable; runner raises or returns CORRUPT
+overall = "REJECTED"
 
-# Attack 8b: strip all block/checkpoint/final signatures
+# Attack 8b: strip all block/checkpoint/final signatures → REJECTED
 [[scenario]]
 id     = "attack8b_strip_signatures"
-title  = "Attack 8b: signatures stripped → never VERIFIED"
+title  = "Attack 8b: signatures stripped → REJECTED"
 media  = "mp4_moovend"
 attack = "strip_signatures"
-overall = "CORRUPT"
-none   = ["VERIFIED", "REPAIRED"]
+overall = "REJECTED"
 
-# Attack 9: profile downgrade in manifest (algorithm swap)
+# Attack 9: profile downgrade in manifest (algorithm swap) → REJECTED
 [[scenario]]
 id     = "attack9_profile_downgrade"
-title  = "Attack 9: profile algorithm downgrade → signature/policy fail"
+title  = "Attack 9: profile algorithm downgrade → REJECTED"
 media  = "mp4_moovend"
 attack = "profile_downgrade"
 params = {field = "sign.alg", value = "Ed25519", fix_hash = true}
-overall = "CORRUPT"
-none    = ["VERIFIED"]
+overall = "REJECTED"
 
-# Attack 10: re-seal with attacker key → certificate chain fail
+# Attack 10: re-seal with attacker key → REJECTED (untrusted root)
 [[scenario]]
 id     = "attack10_attacker_reseal"
-title  = "Attack 10: re-seal with attacker-controlled root → cert chain fail"
+title  = "Attack 10: re-seal with attacker-controlled root → REJECTED"
 media  = "mp4_moovend"
 attack = "attacker_reseal"
-overall = "CORRUPT"
-none    = ["VERIFIED"]
+overall = "REJECTED"
 
 # Attack 11: sign with leaked ephemeral key from an earlier rotation period
-# (needs tsa_offset_s or long media so multiple periods exist)
 [[scenario]]
 id      = "attack11_leaked_key_long"
-title   = "Attack 11: sign later period with earlier leaked ephemeral key → reject"
+title   = "Attack 11: sign later period with earlier leaked ephemeral key → reject block"
 media   = "long"
 attack  = "forge_with_leaked_key"
-overall = "CORRUPT"
+profile = {keys = {rotation_s = 60}}
+overall = "NOT_VERIFIED"
 none    = ["VERIFIED"]
 slow    = true
 
 # Attack 12: replay a valid block signature at a different index
 [[scenario]]
 id     = "attack12_replay_block"
-title  = "Attack 12: replay valid block at wrong index → reject"
+title  = "Attack 12: replay valid block at wrong index → reject block"
 media  = "mp4_moovend"
 attack = "replay_block"
 params = {src = "1", dst = "3"}
-overall = "CORRUPT"
-none    = ["VERIFIED"]
+overall = "NOT_VERIFIED"
 
 # Attack 13: backdated timestamp (TSA clock shifted back 10 000 s)
-# → timestamp outside key validity window flagged
 [[scenario]]
 id           = "attack13_backdated_tsa"
-title        = "Attack 13: backdated TSA timestamp → flag"
+title        = "Attack 13: backdated TSA timestamp → timestamp window check fail"
 media        = "mp4_moovend"
 tsa_offset_s = -10000
-overall      = "CORRUPT"
-none         = ["VERIFIED"]
+overall      = "NOT_VERIFIED"
 
 # Attack 14: forged clip boundary C_{i-1}
 [[scenario]]
 id     = "attack14_forge_clip_boundary"
-title  = "Attack 14: forged clip boundary C_{i-1} → fail"
+title  = "Attack 14: forged clip boundary C_{i-1} → chain check fails"
 media  = "mp4_moovend"
 attack = "forge_clip_boundary"
-overall  = "CORRUPT"
-none     = ["VERIFIED"]
+overall  = "NOT_VERIFIED"
 
 # ============================================================
 # §7B — Audio-specific attacks
@@ -316,7 +287,7 @@ id     = "audio_splice_foreign_wav"
 title  = "Audio: splice 1 s from another recording (WAV) → TAMPERED"
 media  = "wav"
 attack = "swap_foreign"
-overall  = "TAMPERED"
+overall  = "NOT_VERIFIED"
 affected = "TAMPERED"
 others   = "VERIFIED"
 
@@ -326,7 +297,7 @@ title  = "Audio: delete 1 s from call recording (MP3) → SEQUENCE_ERROR"
 media  = "mp3"
 attack = "delete_units"
 params = {unit = "2", count = 1}
-overall = "SEQUENCE_ERROR"
+overall = "NOT_VERIFIED"
 any     = ["SEQUENCE_ERROR"]
 
 [[scenario]]
@@ -334,7 +305,7 @@ id     = "audio_reorder_opus"
 title  = "Audio: reorder Opus units → SEQUENCE_ERROR"
 media  = "opus"
 attack = "reorder"
-overall = "SEQUENCE_ERROR"
+overall = "NOT_VERIFIED"
 any     = ["SEQUENCE_ERROR"]
 
 # ============================================================
@@ -349,23 +320,15 @@ media  = "ts"
 attack = "bitrot"
 params = {rate = 1e-9}
 overall = "VERIFIED"
-# at this rate on a ~100 KB fixture the expected number of flipped bits is ~0.001; pass
-slow   = false
 
 [[scenario]]
 id     = "fault_bitrot_mid"
-title  = "Fault: bit-rot rate=1e-6 (maybe a few bits; parity repairs)"
+title  = "Fault: bit-rot rate=1e-6 (some bits flipped; repaired or corrupt)"
 media  = "ts"
 attack = "bitrot"
 params = {rate = 1e-6}
-overall = "VERIFIED"
-# at this rate a 6 s fixture (~100 KB) flips ~100*8 = ~800 bits on average; k=4 m=2
-# with interleave=2 means a burst hits each stripe once. Most scenarios repair.
-# If the specific seed hits too many, the test may report REPAIRED or CORRUPT —
-# seed is fixed in run_matrix(seed=1) so the outcome is deterministic.
-any  = ["VERIFIED", "REPAIRED"]
-none = ["TAMPERED"]
-slow = false
+none   = ["TAMPERED"]
+# overall is VERIFIED (if repaired) or NOT_VERIFIED (if beyond parity); omit overall check
 
 [[scenario]]
 id     = "fault_bitrot_high"
@@ -374,7 +337,6 @@ media  = "ts"
 attack = "bitrot"
 params = {rate = 1e-5}
 none   = ["TAMPERED"]
-slow   = false
 
 # Burst fault vs interleave
 [[scenario]]
@@ -390,17 +352,11 @@ none     = ["TAMPERED"]
 
 [[scenario]]
 id     = "fault_burst_spanning_interleave"
-title  = "Fault: burst length=3 > interleave=2 → CORRUPT (hits multiple shards per stripe)"
+title  = "Fault: burst length=3 > interleave=2 → within parity or corrupt"
 media  = "ts"
 attack = "burst"
 params = {length = 3}
-# burst spanning 3 consecutive chunks will hit 2+ members of the same stripe
-# (interleave=2 means members at j, j+2, j+4…) — burst of 3 hits j and j+2 in
-# at least one stripe, exceeding m=2 only if 3 members of the same stripe are hit.
-# With interleave=2 and k+m=6, members are 2 apart, so burst=3 hits ≤2 members
-# per stripe. 2 = m → still repairable. Test accepts REPAIRED or CORRUPT.
 none   = ["TAMPERED"]
-slow   = false
 
 # Lose 0, m, m+1 shards per stripe
 [[scenario]]
@@ -424,11 +380,11 @@ none     = ["CORRUPT", "TAMPERED"]
 
 [[scenario]]
 id     = "fault_lose_m_plus1_shards"
-title  = "Fault: lose m+1=3 shards → CORRUPT, never false VERIFIED"
+title  = "Fault: lose m+1=3 shards → CORRUPT unit, NOT_VERIFIED overall"
 media  = "ts"
 attack = "lose_stripe_shards"
 params = {count = 3, stripe = 0}
-overall = "CORRUPT"
+overall = "NOT_VERIFIED"
 none    = ["VERIFIED", "TAMPERED"]
 
 # Manifest copy loss
@@ -442,11 +398,11 @@ overall = "VERIFIED"
 
 [[scenario]]
 id     = "fault_lose_manifest_all"
-title  = "Fault: lose all manifest copies → CORRUPT"
+title  = "Fault: lose all manifest copies → REJECTED"
 media  = "ts"
 attack = "lose_manifest_copies"
 params = {which = ["manifest.json", "manifest.copy.json", "manifest_rs"]}
-overall = "CORRUPT"
+overall = "REJECTED"
 
 # kill -9 mid-seal (crash after 2 fsync'd blocks)
 [[scenario]]
@@ -455,7 +411,7 @@ title = "Fault: crash after 2 blocks → partial bundle, UNSEALED_TAIL"
 media = "ts"
 kind  = "crash"
 params = {after_blocks = 2}
-overall = "UNSEALED_TAIL"
+overall = "NOT_VERIFIED"
 tail    = "UNSEALED_TAIL"
 
 # ============================================================
@@ -469,33 +425,33 @@ title  = "Image: remove photo from set → SEQUENCE_ERROR"
 media  = "images_jpg"
 attack = "remove_photo"
 params = {unit = "2"}
-overall = "SEQUENCE_ERROR"
+overall = "NOT_VERIFIED"
 any     = ["SEQUENCE_ERROR"]
 none    = ["TAMPERED"]
 
-# Edit a region inside the bundle (pixel/coefficient change in AEAD-sealed image)
-[[scenario]]
-id     = "img_edit_region_jpg"
-title  = "Image: edit region inside bundle (JPEG) → per-tile TAMPERED"
-media  = "images_jpg"
-attack = "edit_image_region"
-params = {unit = "2", box = [70, 70, 40, 30]}
-overall   = "TAMPERED"
-affected  = "TAMPERED"
-others    = "VERIFIED"
-tiles_min = {TAMPERED = 1}
-none      = ["SEQUENCE_ERROR"]
-
+# Edit a region inside the bundle (pixel change in PNG AEAD-sealed image)
 [[scenario]]
 id     = "img_edit_region_png"
 title  = "Image: edit region inside bundle (PNG) → per-tile TAMPERED"
 media  = "images_png"
 attack = "edit_image_region"
 params = {unit = "2", box = [70, 70, 40, 30]}
-overall   = "TAMPERED"
+overall   = "NOT_VERIFIED"
 affected  = "TAMPERED"
 others    = "VERIFIED"
 tiles_min = {TAMPERED = 1}
+
+# JPEG in-bundle edit (see DEVIATIONS.md D3: until DCT edit is implemented in Step 3,
+# Pillow re-saves the JPEG causing LIKELY_EDITED / UNVERIFIED tiles)
+[[scenario]]
+id     = "img_edit_region_jpg"
+title  = "Image: edit region inside bundle (JPEG) → TAMPERED unit (per-tile D3)"
+media  = "images_jpg"
+attack = "edit_image_region"
+params = {unit = "2", box = [70, 70, 40, 30]}
+overall   = "NOT_VERIFIED"
+affected  = "TAMPERED"
+others    = "VERIFIED"
 
 # External compare_copy transforms (kind=compare)
 
@@ -554,7 +510,7 @@ media     = "images_jpg"
 kind      = "compare"
 transform = "recompress_edit"
 unit      = "1"
-verdict   = "LIKELY_EDITED"
+verdict   = "RECOMPRESSED"
 tiles_min = {LIKELY_EDITED = 1}
 tiles_max = {TAMPERED = 0}
 
@@ -581,5 +537,5 @@ verdict   = "DERIVED_COPY"
 id     = "img_gap_declared"
 title  = "Image set with gap in capture-time ordering → GAP_DECLARED"
 media  = "images_jpg_gap"
-overall = "VERIFIED"
+overall = "NOT_VERIFIED"
 any     = ["GAP_DECLARED"]

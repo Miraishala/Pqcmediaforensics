@@ -32,8 +32,11 @@ def imprint(msg: bytes) -> bytes:
     return hashlib.new(crypto.TSA_IMPRINT_HASH, msg).digest()
 
 
+from evseal.core.manifest import jcs
+
+
 def _local_msg(tok: dict) -> bytes:
-    return b"evseal-tst" + json.dumps({k: tok[k] for k in ("tsa_fp", "time", "imprint")}, sort_keys=True).encode()
+    return b"evseal-tst" + jcs({k: tok[k] for k in ("tsa_fp", "time", "imprint")})
 
 
 class LocalTSA:

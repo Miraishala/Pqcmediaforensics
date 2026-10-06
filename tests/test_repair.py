@@ -40,7 +40,7 @@ def _seal_small_stripe(ec_lab, tmp_path: Path, k=4, m=2, interleave=2) -> Path:
     }))
     bundle = tmp_path / "bundle"
     tsa = LocalTSA(ec_lab["ws"].home / "tsa")
-    seal_path(ec_lab["ts"], p, ec_lab["ws"].root("ec-root"), bundle, tsa=tsa, anchor_log=None)
+    seal_path(ec_lab["ts"], p, ec_lab["ws"].root("ec-root"), bundle, tsa=tsa, anchor_log=ec_lab["ws"].anchor_log())
     return bundle
 
 
@@ -70,15 +70,21 @@ def test_m_lost_shards_repaired(ec_lab, tmp_path):
 
 
 def test_m_plus1_lost_shards_corrupt(ec_lab, tmp_path):
-    """Lose m+1=3 segments → CORRUPT, never VERIFIED."""
-    bundle = _seal_small_stripe(ec_lab, tmp_path, k=4, m=2)
-    segs = sorted((bundle / "segments").glob("*.seg")) if (bundle / "segments").exists() else sorted(bundle.glob("*.seg"))
-    if len(segs) < 3:
-        pytest.skip("Not enough segments for this test")
-    for s in segs[:3]:
-        s.unlink()
+    """Lose m+1=3 segments from the SAME stripe → CORRUPT, never VERIFIED."""
+    bundle = _seal_small_stripe(ec_lab, tmp_path, k=4, m=2, interleave=2)
+    from evseal.core.manifest import Bundle, seg_name
+    from evseal.resilience import ec
+    m, _ = Bundle(bundle).load_manifest()
+    table = ec.chunk_table(m["units"])
+    stripe_0_members = ec.stripes(len(table), 4, 2)[0]
+    if len(stripe_0_members) < 3:
+        pytest.skip("Not enough stripe members in fixture")
+    # Delete 3 data units that belong to the SAME stripe
+    lost_units = [table[g][0] for g in stripe_0_members[:3]]
+    for i in lost_units:
+        (bundle / seg_name(i)).unlink(missing_ok=True)
     r = verify(bundle, ec_lab["ws"].trust())
-    assert r.overall != "VERIFIED", "m+1 shards lost but reported VERIFIED — CRITICAL BUG"
+    assert r.overall != "VERIFIED", "m+1 shards lost from same stripe but reported VERIFIED — CRITICAL BUG"
     tampered = [u for u in r.units if u.status == "TAMPERED"]
     assert not tampered, f"m+1 shard loss must not produce TAMPERED: {tampered}"
 
@@ -96,7 +102,7 @@ def test_repair_writeback(ec_lab, tmp_path):
     if not repaired_before:
         pytest.skip("No units were REPAIRED — shard loss may not have hit this stripe")
 
-    rep_mod.run_repair(bundle, ec_lab["ws"].trust())
+    rep_mod.run(bundle, ec_lab["ws"].trust())
 
     r_after = verify(bundle, ec_lab["ws"].trust())
     assert r_after.overall == "VERIFIED"
