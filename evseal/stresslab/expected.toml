@@ -1,0 +1,585 @@
+# stresslab/expected.toml — EviSeal stress scenario matrix (SPEC §7)
+#
+# Every entry is run by runner.py / tests/test_stress_matrix.py.
+# A mismatch between expected and actual is a BUG in code, not in this file
+# (unless SPEC explicitly says otherwise — ask first).
+#
+# Fields
+# ------
+# id          unique slug used as the pytest parameter id
+# title       human-readable label
+# media       synth target: mp4_moovend | mp4_faststart | mp4_fragmented | ts |
+#             h264 | h265 | wav | mp3 | m4a | opus | long | images_jpg | images_png |
+#             images_jpg_gap  (runner.py Lab.media())
+# profile     optional TOML inline-table overriding the lab base profile
+# attack      function name in ATTACKS dict (attacks.py); omit for correctness runs
+# kind        compare | crash  (alternative to attack for special run modes)
+# transform   transform name in TRANSFORMS dict (transforms.py); used when kind=compare
+# params      extra keyword args passed to the attack/transform function
+# tsa_offset_s  seconds to shift LocalTSA clock (attack 13)
+#
+# Expected-result fields (all optional; runner checks only the keys present)
+# --------
+# overall     VERIFIED | REPAIRED | CORRUPT | TAMPERED | SEQUENCE_ERROR | UNSEALED_TAIL
+# affected    status(es) expected on units listed in attack's returned {"units":[…]}
+# others      status expected on all untouched data units (usually "VERIFIED")
+# any         list of statuses — at least one unit must have each
+# none        list of statuses — no affected unit must have any of these
+# head        status of the FIRST data unit
+# tail        status of the LAST data unit
+# verdict     (kind=compare only) compare_copy verdict string
+# tiles       exact {status: count} on tiles across all units (kind=compare) or per-unit
+# tiles_min   {status: count} lower bounds
+# tiles_max   {status: count} upper bounds
+# slow        true → @pytest.mark.slow (skipped in fast CI; runs in full matrix)
+
+# ============================================================
+# §7A — Correctness
+# ============================================================
+
+[[scenario]]
+id    = "correct_mp4_moovend"
+title = "Seal+verify round-trip: MP4 moov-at-end"
+media = "mp4_moovend"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_mp4_faststart"
+title = "Seal+verify round-trip: MP4 faststart"
+media = "mp4_faststart"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_mp4_fragmented"
+title = "Seal+verify round-trip: fragmented MP4"
+media = "mp4_fragmented"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_ts"
+title = "Seal+verify round-trip: MPEG-TS"
+media = "ts"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_h264"
+title = "Seal+verify round-trip: raw H.264"
+media = "h264"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_h265"
+title = "Seal+verify round-trip: raw H.265"
+media = "h265"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_wav"
+title = "Seal+verify round-trip: WAV audio"
+media = "wav"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_mp3"
+title = "Seal+verify round-trip: MP3 audio"
+media = "mp3"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_m4a"
+title = "Seal+verify round-trip: M4A audio"
+media = "m4a"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_opus"
+title = "Seal+verify round-trip: Opus audio"
+media = "opus"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_images_jpg"
+title = "Seal+verify round-trip: JPEG image set"
+media = "images_jpg"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_images_png"
+title = "Seal+verify round-trip: PNG image set"
+media = "images_png"
+overall = "VERIFIED"
+others  = "VERIFIED"
+
+[[scenario]]
+id    = "correct_long"
+title = "Seal+verify round-trip: long recording (3 rotation periods, 2 checkpoints)"
+media = "long"
+overall = "VERIFIED"
+others  = "VERIFIED"
+slow   = true
+
+# ============================================================
+# §7B — Attacks 1–14
+# ============================================================
+
+# Attack 1: bit-flip in ciphertext (with EC k=4 m=2 → REPAIRED if within budget)
+[[scenario]]
+id     = "attack1_bitflip_ts"
+title  = "Attack 1: bit-flip in ciphertext → REPAIRED (within parity budget)"
+media  = "ts"
+attack = "bitflip"
+params = {unit = "random", flips = 1}
+overall  = "VERIFIED"
+affected = "REPAIRED"
+others   = "VERIFIED"
+none     = ["CORRUPT", "TAMPERED"]
+
+# Attack 1 variant: bit-flip without parity (m=0) → CORRUPT
+[[scenario]]
+id      = "attack1_bitflip_no_parity"
+title   = "Attack 1: bit-flip without parity → CORRUPT"
+media   = "ts"
+attack  = "bitflip"
+profile = {ec = {k = 4, m = 0, interleave = 2}}
+params  = {unit = "random", flips = 1}
+overall  = "CORRUPT"
+affected = "CORRUPT"
+others   = "VERIFIED"
+none     = ["TAMPERED", "REPAIRED"]
+
+# Attack 2: decrypt-edit-reencrypt (TAMPERED: tag passes, R_i mismatches)
+[[scenario]]
+id     = "attack2_reencrypt_edit_mp4"
+title  = "Attack 2: decrypt+edit+re-encrypt → TAMPERED"
+media  = "mp4_moovend"
+attack = "reencrypt_edit"
+overall  = "TAMPERED"
+affected = "TAMPERED"
+others   = "VERIFIED"
+none     = ["CORRUPT", "SEQUENCE_ERROR"]
+
+[[scenario]]
+id     = "attack2_reencrypt_edit_ts"
+title  = "Attack 2: decrypt+edit+re-encrypt (TS) → TAMPERED"
+media  = "ts"
+attack = "reencrypt_edit"
+overall  = "TAMPERED"
+affected = "TAMPERED"
+others   = "VERIFIED"
+none     = ["CORRUPT", "SEQUENCE_ERROR"]
+
+# Attack 3: swap in a segment from another recording
+[[scenario]]
+id     = "attack3_swap_foreign"
+title  = "Attack 3: foreign segment spliced in → TAMPERED"
+media  = "mp4_moovend"
+attack = "swap_foreign"
+overall  = "TAMPERED"
+affected = "TAMPERED"
+others   = "VERIFIED"
+
+# Attack 4: delete segments → SEQUENCE_ERROR at the gap
+[[scenario]]
+id     = "attack4_delete_units"
+title  = "Attack 4: delete 1 segment → SEQUENCE_ERROR"
+media  = "mp4_moovend"
+attack = "delete_units"
+params = {unit = "2", count = 1}
+overall = "SEQUENCE_ERROR"
+any     = ["SEQUENCE_ERROR"]
+none    = ["TAMPERED", "CORRUPT"]
+
+# Attack 5: insert a duplicate segment
+[[scenario]]
+id     = "attack5_insert_unit"
+title  = "Attack 5: insert duplicate segment → SEQUENCE_ERROR"
+media  = "mp4_moovend"
+attack = "insert_unit"
+overall = "SEQUENCE_ERROR"
+any     = ["SEQUENCE_ERROR"]
+none    = ["TAMPERED"]
+
+# Attack 6: reorder two segments
+[[scenario]]
+id     = "attack6_reorder"
+title  = "Attack 6: swap two segments → SEQUENCE_ERROR"
+media  = "mp4_moovend"
+attack = "reorder"
+overall = "SEQUENCE_ERROR"
+any     = ["SEQUENCE_ERROR"]
+none    = ["TAMPERED"]
+
+# Attack 7: truncate tail before final seal
+[[scenario]]
+id     = "attack7_truncate_tail"
+title  = "Attack 7: truncate tail (no final seal) → UNSEALED_TAIL"
+media  = "mp4_moovend"
+attack = "truncate_tail"
+params = {count = 1}
+overall = "UNSEALED_TAIL"
+tail    = "UNSEALED_TAIL"
+
+# Attack 8a: strip manifest
+[[scenario]]
+id     = "attack8a_strip_manifest"
+title  = "Attack 8a: manifest stripped → REJECT (not VERIFIED)"
+media  = "mp4_moovend"
+attack = "strip_manifest"
+overall = "CORRUPT"
+# any verdict except VERIFIED is acceptable; runner raises or returns CORRUPT
+
+# Attack 8b: strip all block/checkpoint/final signatures
+[[scenario]]
+id     = "attack8b_strip_signatures"
+title  = "Attack 8b: signatures stripped → never VERIFIED"
+media  = "mp4_moovend"
+attack = "strip_signatures"
+overall = "CORRUPT"
+none   = ["VERIFIED", "REPAIRED"]
+
+# Attack 9: profile downgrade in manifest (algorithm swap)
+[[scenario]]
+id     = "attack9_profile_downgrade"
+title  = "Attack 9: profile algorithm downgrade → signature/policy fail"
+media  = "mp4_moovend"
+attack = "profile_downgrade"
+params = {field = "sign.alg", value = "Ed25519", fix_hash = true}
+overall = "CORRUPT"
+none    = ["VERIFIED"]
+
+# Attack 10: re-seal with attacker key → certificate chain fail
+[[scenario]]
+id     = "attack10_attacker_reseal"
+title  = "Attack 10: re-seal with attacker-controlled root → cert chain fail"
+media  = "mp4_moovend"
+attack = "attacker_reseal"
+overall = "CORRUPT"
+none    = ["VERIFIED"]
+
+# Attack 11: sign with leaked ephemeral key from an earlier rotation period
+# (needs tsa_offset_s or long media so multiple periods exist)
+[[scenario]]
+id      = "attack11_leaked_key_long"
+title   = "Attack 11: sign later period with earlier leaked ephemeral key → reject"
+media   = "long"
+attack  = "forge_with_leaked_key"
+overall = "CORRUPT"
+none    = ["VERIFIED"]
+slow    = true
+
+# Attack 12: replay a valid block signature at a different index
+[[scenario]]
+id     = "attack12_replay_block"
+title  = "Attack 12: replay valid block at wrong index → reject"
+media  = "mp4_moovend"
+attack = "replay_block"
+params = {src = "1", dst = "3"}
+overall = "CORRUPT"
+none    = ["VERIFIED"]
+
+# Attack 13: backdated timestamp (TSA clock shifted back 10 000 s)
+# → timestamp outside key validity window flagged
+[[scenario]]
+id           = "attack13_backdated_tsa"
+title        = "Attack 13: backdated TSA timestamp → flag"
+media        = "mp4_moovend"
+tsa_offset_s = -10000
+overall      = "CORRUPT"
+none         = ["VERIFIED"]
+
+# Attack 14: forged clip boundary C_{i-1}
+[[scenario]]
+id     = "attack14_forge_clip_boundary"
+title  = "Attack 14: forged clip boundary C_{i-1} → fail"
+media  = "mp4_moovend"
+attack = "forge_clip_boundary"
+overall  = "CORRUPT"
+none     = ["VERIFIED"]
+
+# ============================================================
+# §7B — Audio-specific attacks
+# ============================================================
+
+[[scenario]]
+id     = "audio_splice_foreign_wav"
+title  = "Audio: splice 1 s from another recording (WAV) → TAMPERED"
+media  = "wav"
+attack = "swap_foreign"
+overall  = "TAMPERED"
+affected = "TAMPERED"
+others   = "VERIFIED"
+
+[[scenario]]
+id     = "audio_delete_unit_mp3"
+title  = "Audio: delete 1 s from call recording (MP3) → SEQUENCE_ERROR"
+media  = "mp3"
+attack = "delete_units"
+params = {unit = "2", count = 1}
+overall = "SEQUENCE_ERROR"
+any     = ["SEQUENCE_ERROR"]
+
+[[scenario]]
+id     = "audio_reorder_opus"
+title  = "Audio: reorder Opus units → SEQUENCE_ERROR"
+media  = "opus"
+attack = "reorder"
+overall = "SEQUENCE_ERROR"
+any     = ["SEQUENCE_ERROR"]
+
+# ============================================================
+# §7C — Fault scenarios
+# ============================================================
+
+# Bit-rot at various rates
+[[scenario]]
+id     = "fault_bitrot_low"
+title  = "Fault: bit-rot rate=1e-9 (usually nothing hit in 6 s fixture)"
+media  = "ts"
+attack = "bitrot"
+params = {rate = 1e-9}
+overall = "VERIFIED"
+# at this rate on a ~100 KB fixture the expected number of flipped bits is ~0.001; pass
+slow   = false
+
+[[scenario]]
+id     = "fault_bitrot_mid"
+title  = "Fault: bit-rot rate=1e-6 (maybe a few bits; parity repairs)"
+media  = "ts"
+attack = "bitrot"
+params = {rate = 1e-6}
+overall = "VERIFIED"
+# at this rate a 6 s fixture (~100 KB) flips ~100*8 = ~800 bits on average; k=4 m=2
+# with interleave=2 means a burst hits each stripe once. Most scenarios repair.
+# If the specific seed hits too many, the test may report REPAIRED or CORRUPT —
+# seed is fixed in run_matrix(seed=1) so the outcome is deterministic.
+any  = ["VERIFIED", "REPAIRED"]
+none = ["TAMPERED"]
+slow = false
+
+[[scenario]]
+id     = "fault_bitrot_high"
+title  = "Fault: bit-rot rate=1e-5 (many bits; likely CORRUPT or REPAIRED)"
+media  = "ts"
+attack = "bitrot"
+params = {rate = 1e-5}
+none   = ["TAMPERED"]
+slow   = false
+
+# Burst fault vs interleave
+[[scenario]]
+id     = "fault_burst_within_interleave"
+title  = "Fault: burst length=1 < interleave=2 → REPAIRED"
+media  = "ts"
+attack = "burst"
+params = {length = 1}
+overall  = "VERIFIED"
+affected = "REPAIRED"
+others   = "VERIFIED"
+none     = ["TAMPERED"]
+
+[[scenario]]
+id     = "fault_burst_spanning_interleave"
+title  = "Fault: burst length=3 > interleave=2 → CORRUPT (hits multiple shards per stripe)"
+media  = "ts"
+attack = "burst"
+params = {length = 3}
+# burst spanning 3 consecutive chunks will hit 2+ members of the same stripe
+# (interleave=2 means members at j, j+2, j+4…) — burst of 3 hits j and j+2 in
+# at least one stripe, exceeding m=2 only if 3 members of the same stripe are hit.
+# With interleave=2 and k+m=6, members are 2 apart, so burst=3 hits ≤2 members
+# per stripe. 2 = m → still repairable. Test accepts REPAIRED or CORRUPT.
+none   = ["TAMPERED"]
+slow   = false
+
+# Lose 0, m, m+1 shards per stripe
+[[scenario]]
+id     = "fault_lose_0_shards"
+title  = "Fault: lose 0 shards → VERIFIED"
+media  = "ts"
+attack = "lose_stripe_shards"
+params = {count = 0, stripe = 0}
+overall = "VERIFIED"
+
+[[scenario]]
+id     = "fault_lose_m_shards"
+title  = "Fault: lose exactly m=2 shards → REPAIRED"
+media  = "ts"
+attack = "lose_stripe_shards"
+params = {count = 2, stripe = 0}
+overall  = "VERIFIED"
+affected = "REPAIRED"
+others   = "VERIFIED"
+none     = ["CORRUPT", "TAMPERED"]
+
+[[scenario]]
+id     = "fault_lose_m_plus1_shards"
+title  = "Fault: lose m+1=3 shards → CORRUPT, never false VERIFIED"
+media  = "ts"
+attack = "lose_stripe_shards"
+params = {count = 3, stripe = 0}
+overall = "CORRUPT"
+none    = ["VERIFIED", "TAMPERED"]
+
+# Manifest copy loss
+[[scenario]]
+id     = "fault_lose_manifest_primary"
+title  = "Fault: lose primary manifest.json → recovered from copy"
+media  = "ts"
+attack = "lose_manifest_copies"
+params = {which = ["manifest.json"]}
+overall = "VERIFIED"
+
+[[scenario]]
+id     = "fault_lose_manifest_all"
+title  = "Fault: lose all manifest copies → CORRUPT"
+media  = "ts"
+attack = "lose_manifest_copies"
+params = {which = ["manifest.json", "manifest.copy.json", "manifest_rs"]}
+overall = "CORRUPT"
+
+# kill -9 mid-seal (crash after 2 fsync'd blocks)
+[[scenario]]
+id    = "fault_crash_after2"
+title = "Fault: crash after 2 blocks → partial bundle, UNSEALED_TAIL"
+media = "ts"
+kind  = "crash"
+params = {after_blocks = 2}
+overall = "UNSEALED_TAIL"
+tail    = "UNSEALED_TAIL"
+
+# ============================================================
+# §7G — Image set & tile-localization matrix
+# ============================================================
+
+# Remove a photo (attack on image set)
+[[scenario]]
+id     = "img_remove_photo"
+title  = "Image: remove photo from set → SEQUENCE_ERROR"
+media  = "images_jpg"
+attack = "remove_photo"
+params = {unit = "2"}
+overall = "SEQUENCE_ERROR"
+any     = ["SEQUENCE_ERROR"]
+none    = ["TAMPERED"]
+
+# Edit a region inside the bundle (pixel/coefficient change in AEAD-sealed image)
+[[scenario]]
+id     = "img_edit_region_jpg"
+title  = "Image: edit region inside bundle (JPEG) → per-tile TAMPERED"
+media  = "images_jpg"
+attack = "edit_image_region"
+params = {unit = "2", box = [70, 70, 40, 30]}
+overall   = "TAMPERED"
+affected  = "TAMPERED"
+others    = "VERIFIED"
+tiles_min = {TAMPERED = 1}
+none      = ["SEQUENCE_ERROR"]
+
+[[scenario]]
+id     = "img_edit_region_png"
+title  = "Image: edit region inside bundle (PNG) → per-tile TAMPERED"
+media  = "images_png"
+attack = "edit_image_region"
+params = {unit = "2", box = [70, 70, 40, 30]}
+overall   = "TAMPERED"
+affected  = "TAMPERED"
+others    = "VERIFIED"
+tiles_min = {TAMPERED = 1}
+
+# External compare_copy transforms (kind=compare)
+
+[[scenario]]
+id        = "img_compare_identical"
+title     = "compare_copy: identical copy → all tiles VERIFIED"
+media     = "images_jpg"
+kind      = "compare"
+transform = "identical"
+unit      = "1"
+verdict   = "VERIFIED"
+
+[[scenario]]
+id        = "img_compare_exif_only"
+title     = "compare_copy: EXIF-only edit → METADATA_CHANGED, pixel tiles VERIFIED"
+media     = "images_jpg"
+kind      = "compare"
+transform = "exif_edit"
+unit      = "1"
+verdict   = "METADATA_CHANGED"
+
+[[scenario]]
+id        = "img_compare_one_pixel_png"
+title     = "compare_copy: single pixel change (PNG) → exactly 1 tile TAMPERED"
+media     = "images_png"
+kind      = "compare"
+transform = "one_pixel"
+unit      = "1"
+verdict   = "TAMPERED"
+tiles     = {TAMPERED = 1}
+
+[[scenario]]
+id        = "img_compare_one_coefficient"
+title     = "compare_copy: single DCT coefficient change (JPEG) → exactly 1 tile TAMPERED"
+media     = "images_jpg"
+kind      = "compare"
+transform = "one_coefficient"
+unit      = "1"
+verdict   = "TAMPERED"
+tiles     = {TAMPERED = 1}
+
+[[scenario]]
+id        = "img_compare_recompress_only"
+title     = "compare_copy: recompressed, unedited → no tile above LIKELY_EDITED threshold"
+media     = "images_jpg"
+kind      = "compare"
+transform = "recompress"
+unit      = "1"
+verdict   = "RECOMPRESSED"
+tiles_max = {TAMPERED = 0}
+
+[[scenario]]
+id        = "img_compare_recompress_edit"
+title     = "compare_copy: recompressed+edited → edited region tiles LIKELY_EDITED"
+media     = "images_jpg"
+kind      = "compare"
+transform = "recompress_edit"
+unit      = "1"
+verdict   = "LIKELY_EDITED"
+tiles_min = {LIKELY_EDITED = 1}
+tiles_max = {TAMPERED = 0}
+
+[[scenario]]
+id        = "img_compare_crop"
+title     = "compare_copy: cropped → DERIVED_COPY"
+media     = "images_jpg"
+kind      = "compare"
+transform = "crop"
+unit      = "1"
+verdict   = "DERIVED_COPY"
+
+[[scenario]]
+id        = "img_compare_resize"
+title     = "compare_copy: resized → DERIVED_COPY"
+media     = "images_jpg"
+kind      = "compare"
+transform = "resize"
+unit      = "1"
+verdict   = "DERIVED_COPY"
+
+# Image set with gap record (images numbered 1,2,4,5 — 3 is missing → GAP_DECLARED)
+[[scenario]]
+id     = "img_gap_declared"
+title  = "Image set with gap in capture-time ordering → GAP_DECLARED"
+media  = "images_jpg_gap"
+overall = "VERIFIED"
+any     = ["GAP_DECLARED"]
