@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.evseal
 *.key
+*.key.json
 *.pem
 /bundles/
 /.benchmarks/
@@ -14,3 +15,7 @@ node_modules/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# ui build + workspace
+evseal/ui/dist/
+.evseal-demo/

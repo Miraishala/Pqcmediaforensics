@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 
+from pathlib import Path
+
 import typer
 
 from evseal.core import crypto
@@ -110,6 +112,147 @@ def doctor() -> None:
     else:
         typer.echo("Overall: NOT READY — see missing items above.", err=True)
         raise typer.Exit(code=1)
+
+
+HomeOpt = typer.Option(None, "--home", help="workspace (default $EVSEAL_HOME or ~/.evseal)")
+
+
+def _ws(home):
+    from evseal.workspace import Workspace
+
+    return Workspace(home)
+
+
+def _trust(ws, extra_roots: list[str] | None, allow_classical: bool):
+    from evseal.longterm.keys import Trust
+
+    t = ws.trust(allow_classical)
+    if extra_roots:
+        t.roots.update(Trust.from_paths(roots=extra_roots).roots)
+    return t
+
+
+@app.command()
+def keygen(name: str, alg: str = typer.Option("ML-DSA-87", help="root/collector key algorithm"), home: str = HomeOpt):
+    """Generate a root (collector) key in the workspace. DEV-ONLY file-based private key."""
+    pub = _ws(home).keygen(name, alg)
+    typer.echo(f"{name}: {pub['alg']} fp={pub['fp']}")
+
+
+@app.command()
+def seal(src: str, out: str, key: str = typer.Option(..., help="root key name"), profile: str = typer.Option(None, help="preset or TOML"),
+         acq_md5: str = typer.Option(None, help="legacy MD5 acquisition hash to record/check"),
+         acq_sha1: str = typer.Option(None, help="legacy SHA-1 acquisition hash to record/check"), home: str = HomeOpt):
+    """Seal a video/audio file or an image folder into a bundle directory."""
+    from evseal.core.seal import seal_path
+
+    ws = _ws(home)
+    claims = {k: v for k, v in (("md5", acq_md5), ("sha1", acq_sha1)) if v}
+
+    def progress(stage, done, total):
+        typer.echo(f"\r{stage:<9} {done}/{total}", nl=stage == "done")
+
+    seal_path(Path(src), ws.profile(profile), ws.root(key), Path(out), tsa=ws.tsa(), anchor_log=ws.anchor_log(),
+              legacy_claims=claims, progress=progress)
+    typer.echo(f"sealed -> {out}")
+
+
+@app.command()
+def verify(bundle: str, trust_root: list[str] = typer.Option(None, help="extra trusted root .pub.json"),
+           allow_classical: bool = False, json_out: str = typer.Option(None, "--json", help="write report JSON"),
+           home: str = HomeOpt):
+    """Verify a bundle or clip (reference verifier). Exit 0 only when VERIFIED."""
+    import json
+
+    from evseal.core.verify import verify as _verify
+
+    r = _verify(Path(bundle), _trust(_ws(home), trust_root, allow_classical))
+    typer.echo(f"overall: {r.overall}   {r.counts()}")
+    for reason in r.reasons:
+        typer.echo(f"  ! {reason}")
+    for u in r.units:
+        if u.status != "VERIFIED":
+            typer.echo(f"  unit {u.i:>6} {u.status:<15} {u.detail}")
+    if json_out:
+        Path(json_out).write_text(json.dumps(r.to_dict(), indent=1))
+    raise typer.Exit(0 if r.overall == "VERIFIED" else 1)
+
+
+@app.command()
+def clip(bundle: str, out: str, start: int = typer.Option(None, help="first unit"), end: int = typer.Option(None, help="last unit"),
+         t0: float = typer.Option(None, help="start time s"), t1: float = typer.Option(None, help="end time s")):
+    """Export a standalone clip (units start..end or a time range)."""
+    from evseal.core.clip import make_clip, range_for_time
+    from evseal.core.manifest import Bundle
+
+    if start is None:
+        start, end = range_for_time(Bundle(Path(bundle)).load_manifest()[0], t0, t1)
+    make_clip(Path(bundle), start, end, Path(out))
+    typer.echo(f"clip {start}..{end} -> {out}")
+
+
+@app.command("open")
+def open_cmd(bundle: str, out: str, partial: bool = typer.Option(False, help="write only VERIFIED/REPAIRED units"), home: str = HomeOpt):
+    """Verify-to-open: restore the original (or clip) only if it verifies."""
+    from evseal.core.open import NotVerified, open_bundle
+
+    try:
+        rep, outputs = open_bundle(Path(bundle), _ws(home).trust(), Path(out), partial=partial)
+    except NotVerified as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1)
+    typer.echo(f"{rep.overall}: {outputs}")
+
+
+@app.command()
+def repair(bundle: str, replica: list[str] = typer.Option(None), dry_run: bool = False, key: str = typer.Option(None), home: str = HomeOpt):
+    """Rebuild damaged units from parity/replicas, write back, re-verify."""
+    from evseal.resilience import repair as r
+
+    ws = _ws(home)
+    if dry_run:
+        typer.echo(r.plan(Path(bundle), ws.trust(), tuple(replica or ())))
+        return
+    before, after, units = r.run(Path(bundle), ws.trust(), ws.root(key) if key else None, tuple(replica or ()))
+    typer.echo(f"{before.overall} -> {after.overall}; repaired units {units}")
+
+
+@app.command()
+def reseal(bundle: str, key: str = typer.Option(...), hash_alg: str = typer.Option(None), home: str = HomeOpt):
+    """Append an evidence-record reseal signed by a (current) trusted root key."""
+    from evseal.longterm.reseal import reseal as _reseal
+
+    ws = _ws(home)
+    rec = _reseal(Path(bundle), ws.root(key), ws.tsa(), hash_alg)
+    typer.echo(f"resealed: {rec['alg']} over {rec['hash_alg']} {rec['manifest_hash'][:16]}…")
+
+
+@app.command()
+def compare(bundle: str, unit: int, copy: str, home: str = HomeOpt):
+    """Compare an external copy of a sealed photo against the bundle (tile map)."""
+    from evseal.core.verify import compare_copy
+
+    out = compare_copy(Path(bundle), _ws(home).trust(), unit, Path(copy).read_bytes())
+    counts: dict = {}
+    for t in out.get("tiles", []):
+        counts[t["status"]] = counts.get(t["status"], 0) + 1
+    typer.echo(f"{out['verdict']} {counts} {out.get('detail', '')}")
+
+
+@app.command()
+def pack(bundle: str, out: str):
+    """Directory bundle -> single .evseal file (zip, stored)."""
+    from evseal.core.manifest import pack as _pack
+
+    typer.echo(_pack(Path(bundle), Path(out)))
+
+
+@app.command()
+def serve(host: str = "127.0.0.1", port: int = 8000):
+    """Run the API + UI."""
+    import uvicorn
+
+    uvicorn.run("evseal.api.app:app", host=host, port=port)
 
 
 if __name__ == "__main__":

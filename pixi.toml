@@ -6,6 +6,8 @@ platforms = ["win-64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
+ui-build = { cmd = "npm run build", cwd = "evseal/ui" }
+serve = { cmd = "evseal serve --port 8000", env = { EVSEAL_HOME = ".evseal-demo" } }
 
 [dependencies]
 python = "3.12.*"
@@ -22,6 +24,13 @@ liboqs-python = ">=0.16.0.1, <0.17"
 dilithium-py = ">=1.4.0, <2"
 kyber-py = ">=1.2.0, <2"
 evseal = { path = ".", editable = true }
+rfc8785 = ">=0.1.4, <0.2"
+pillow = ">=12"
+pillow-heif = ">=1.8"
+jpeglib = ">=1.0.2"
+numpy = ">=2"
+slh-dsa = ">=0.2.5"
+python-multipart = ">=0.0.20"
 
 [feature.dev.pypi-dependencies]
 pytest = "*"
