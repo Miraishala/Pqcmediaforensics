@@ -24,11 +24,9 @@ of guessing.
 
 **SPEC §2.5:** per-tile status `CORRUPT` when decode errors spread from a damage point beyond
 the parity budget; matching tiles → `VERIFIED`.
-**Symptom:** an image whose AEAD chunks exceed the RS parity budget currently reports the
-whole unit as `CORRUPT` rather than per-tile statuses.
-**Status:** Documented — fix planned for Step 3.
-**Upgrade path:** Decrypt any chunks that survive, zero-fill the rest, decode leniently, recompute
-tile leaves; matching leaves → `VERIFIED`, mismatching leaves beyond damage → `CORRUPT`.
+**Status:** **Fixed** — in `core/verify.py` and `media/image.py`. When AEAD chunks fail and parity
+is exhausted, partial plaintext is reconstructed with zero-filled gaps; `tile_map` assigns
+per-tile `CORRUPT` statuses to damaged tiles while matching intact tiles remain `VERIFIED`.
 
 ---
 
@@ -36,13 +34,10 @@ tile leaves; matching leaves → `VERIFIED`, mismatching leaves beyond damage �
 
 **SPEC §2.5:** "inside a bundle the cryptographic path must give per-tile TAMPERED;
 RECOMPRESSED/LIKELY_EDITED is only for external copies via compare_copy."
-**Symptom:** `edit_image_region` saves the patched image with Pillow (re-saves the JPEG),
-so after reencrypt the DCT coefficients differ but the compare path fires first and reports
-`RECOMPRESSED`.
-**Status:** Documented — fix planned for Step 3.
-**Upgrade path:** Make `edit_image_region` do a DCT-domain edit via jpeglib (no re-save),
-so the tile hashes mismatch deterministically → `TAMPERED`. The perceptual layer stays as
-an advisory overlay only.
+**Status:** **Fixed** — `edit_image_region` now executes exact DCT-domain modifications via `jpeglib`
+without full image re-compression; in-bundle verification in `verify.py` forces `in_bundle=True`
+so cryptographic `TAMPERED` status is always reported for damaged tiles. Added `recompress_and_edit_photo`
+scenario covering re-saved images in bundles.
 
 ---
 
@@ -50,11 +45,9 @@ an advisory overlay only.
 
 **SPEC §5 / §10:** timestamp tokens must be verified against a trusted TSA certificate;
 "fail closed" means an unverified token is not `VERIFIED`.
-**Symptom:** `longterm/timestamps.py` parses the token (imprint, genTime) but does not
-verify the SignedData CMS structure or the TSA certificate.
-**Status:** Documented — fix planned for Step 3.
-**Upgrade path:** Parse SignedData with `cryptography` or `asn1crypto`; verify the signature
-against the stored TSA cert; reject if verification fails. Add offline queueing per §10.
+**Symptom:** `longterm/timestamps.py` parses the token (imprint, genTime) and verifies
+via OpenSSL TS verify when a TSA certificate or CA bundle is available. Added offline queueing (§10).
+**Status:** **Fixed / Partial** — OpenSSL verification path added; local test TSA with native PQ ML-DSA is primary dev verification.
 
 ---
 
@@ -62,10 +55,8 @@ against the stored TSA cert; reject if verification fails. Add offline queueing 
 
 **SPEC §3.3:** every copy/repair/transfer appends a signed chained custody record; the verifier
 checks it.
-**Symptom:** `dr/custody.py` implements `check()` but `core/verify.py` does not call it.
-**Status:** Documented — fix planned for Step 3.
-**Upgrade path:** Call `custody.check(bundle)` at the start of `verify()`; surface custody
-chain failures as a global reason in the `Report`.
+**Status:** **Fixed** — `core/verify.py` reads `custody.log` if present and validates the full
+hash-chain and actor signatures under `trust.roots`, surfacing any discrepancies as global checks.
 
 ---
 
@@ -86,9 +77,9 @@ is the cryptographic defence; `t` is advisory context for the UI.
 
 **media/common.py ponytail:** the clip's `moov` still has stco/co64 offsets relative to the
 full original file; the clip is opened as a sparse file the full original size.
-**Status:** Documented — fix planned for Step 3.
-**Upgrade path:** Rewrite `stco`/`co64` in the clip's `moov` box to compact offsets using
-the `struct` parser already in `media/common.py`.
+**Status:** **Fixed** — `_rewrite_mp4_offsets()` in `media/common.py` dynamically adjusts `stco`
+and `co64` chunk offset boxes in the clip's `moov` header by the data delta shift, so clip previews
+are compact without creating sparse files.
 
 ---
 

@@ -441,17 +441,29 @@ affected  = "TAMPERED"
 others    = "VERIFIED"
 tiles_min = {TAMPERED = 1}
 
-# JPEG in-bundle edit (see DEVIATIONS.md D3: until DCT edit is implemented in Step 3,
-# Pillow re-saves the JPEG causing LIKELY_EDITED / UNVERIFIED tiles)
+# JPEG in-bundle edit (DCT-domain edit: exact tile localization demonstrated)
 [[scenario]]
 id     = "img_edit_region_jpg"
-title  = "Image: edit region inside bundle (JPEG) → TAMPERED unit (per-tile D3)"
+title  = "Image: edit region inside bundle (JPEG) → per-tile TAMPERED"
 media  = "images_jpg"
 attack = "edit_image_region"
 params = {unit = "2", box = [70, 70, 40, 30]}
 overall   = "NOT_VERIFIED"
 affected  = "TAMPERED"
 others    = "VERIFIED"
+tiles_min = {TAMPERED = 1}
+
+# JPEG re-saved + edited in bundle (Deviation D3 scenario: in-bundle crypto TAMPERED always wins)
+[[scenario]]
+id     = "img_recompress_and_edit_jpg"
+title  = "Image: re-saved JPEG + edited in bundle → TAMPERED (with perceptual overlay)"
+media  = "images_jpg"
+attack = "recompress_and_edit_photo"
+params = {unit = "2", box = [70, 70, 40, 30]}
+overall   = "NOT_VERIFIED"
+affected  = "TAMPERED"
+others    = "VERIFIED"
+tiles_min = {TAMPERED = 1}
 
 # External compare_copy transforms (kind=compare)
 

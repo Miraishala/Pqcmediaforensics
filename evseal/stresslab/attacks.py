@@ -346,19 +346,61 @@ def lose_manifest_copies(bdir, rng, ctx, which=("manifest.json",)):
 
 
 def edit_image_region(bdir, rng, ctx, unit="random", box=(70, 70, 40, 30)):
-    """Inpaint/paste a region of one photo, re-encrypted with the derived key."""
+    """Inpaint/paste a region of one photo, re-encrypted with the derived key.
+    For JPEG, performs a DCT-domain coefficient edit so untampered tiles verify cleanly.
+    For PNG, edits pixels in the target box.
+    """
+    import tempfile
     from PIL import Image
 
     m = _m(bdir)
     i = pick(m, rng, unit)
     pt = decrypt_unit(bdir, m, i)
     src = Image.open(io.BytesIO(pt))
-    fmt, exif = src.format, src.info.get("exif")
+    fmt = src.format
+    x, y, w, h = box
+
+    if fmt == "JPEG":
+        import jpeglib
+
+        with tempfile.TemporaryDirectory() as td:
+            src_f, dst_f = Path(td) / "a.jpg", Path(td) / "b.jpg"
+            src_f.write_bytes(pt)
+            im = jpeglib.read_dct(str(src_f))
+            bx0 = max(0, x // 8)
+            bx1 = min(im.Y.shape[1], (x + w + 7) // 8)
+            by0 = max(0, y // 8)
+            by1 = min(im.Y.shape[0], (y + h + 7) // 8)
+            for by in range(by0, by1):
+                for bx in range(bx0, bx1):
+                    im.Y[by, bx, 0, 1] += 5
+            im.write_dct(str(dst_f))
+            edited = dst_f.read_bytes()
+    else:
+        exif = src.info.get("exif")
+        im = src.convert("RGB")
+        im.paste((rng.randrange(256), 0, 255), (x, y, x + w, y + h))
+        buf = io.BytesIO()
+        im.save(buf, fmt, **({"exif": exif} if exif else {}))
+        edited = buf.getvalue()
+
+    reencrypt_unit(bdir, m, i, edited)
+    return {"units": [i]}
+
+
+def recompress_and_edit_photo(bdir, rng, ctx, unit="random", box=(70, 70, 40, 30)):
+    """Attack: re-save the whole JPEG (recompressing all tiles) AND edit a region."""
+    from PIL import Image
+
+    m = _m(bdir)
+    i = pick(m, rng, unit)
+    pt = decrypt_unit(bdir, m, i)
+    src = Image.open(io.BytesIO(pt))
     x, y, w, h = box
     im = src.convert("RGB")
     im.paste((rng.randrange(256), 0, 255), (x, y, x + w, y + h))
     buf = io.BytesIO()
-    im.save(buf, fmt, **({"quality": 90} if fmt == "JPEG" else {}), **({"exif": exif} if exif else {}))
+    im.save(buf, "JPEG", quality=85)
     reencrypt_unit(bdir, m, i, buf.getvalue())
     return {"units": [i]}
 
@@ -370,7 +412,7 @@ def remove_photo(bdir, rng, ctx, unit="2"):
 ATTACKS = {f.__name__: f for f in (
     bitflip, reencrypt_edit, swap_foreign, delete_units, insert_unit, reorder, truncate_tail, strip_manifest,
     strip_signatures, profile_downgrade, attacker_reseal, forge_with_leaked_key, replay_block, forge_clip_boundary,
-    bitrot, burst, lose_stripe_shards, lose_manifest_copies, edit_image_region, remove_photo,
+    bitrot, burst, lose_stripe_shards, lose_manifest_copies, edit_image_region, recompress_and_edit_photo, remove_photo,
 )}
 
 

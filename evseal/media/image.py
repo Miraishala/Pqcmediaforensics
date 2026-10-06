@@ -153,18 +153,26 @@ def _tile_xy(key: str) -> tuple[int, int]:
     return int(x), int(y)
 
 
-def tile_map(signed_tiles: dict, candidate: bytes, alg: str, threshold: float, original: bytes | None = None) -> dict:
+def tile_map(signed_tiles: dict, candidate: bytes, alg: str, threshold: float, original: bytes | None = None,
+             in_bundle: bool = False) -> dict:
     """Localize differences between a sealed image (its signed leaves) and candidate bytes.
 
     verdict: VERIFIED | METADATA_CHANGED | TAMPERED | RECOMPRESSED | DERIVED_COPY | UNRELATED.
-    Cryptographic tile statuses always win; LIKELY_EDITED only appears in RECOMPRESSED mode
-    (most tiles fail cryptographically), never downgrading a cryptographic VERIFIED.
+    Inside a bundle (in_bundle=True), cryptographic tile statuses always win (TAMPERED per tile),
+    with perceptual distances attached as an advisory overlay.
+    For external copies (in_bundle=False), LIKELY_EDITED appears when recompressed.
     """
     signed = signed_tiles["leaves"]
     try:
         fresh = leaves(candidate, signed_tiles["tile"], alg, "thumb8")
     except Exception as exc:
-        return {"verdict": "CORRUPT", "detail": f"candidate does not decode: {exc}", "tiles": []}
+        tiles = []
+        for lf in signed:
+            if lf["k"].startswith("t:"):
+                x, y = _tile_xy(lf["k"])
+                tiles.append({"x": x, "y": y, "status": "CORRUPT"})
+        return {"verdict": "CORRUPT", "detail": f"candidate does not decode: {exc}", "tile": signed_tiles.get("tile", 64),
+                "w": signed_tiles.get("w", 0), "h": signed_tiles.get("h", 0), "metadata_changed": [], "tiles": tiles}
     if (fresh["w"], fresh["h"]) != (signed_tiles["w"], signed_tiles["h"]):
         return _derived(signed_tiles, candidate, original)
     st = compare(alg, signed, fresh["leaves"] if fresh["basis"] == signed_tiles["basis"] else [])
@@ -173,7 +181,7 @@ def tile_map(signed_tiles: dict, candidate: bytes, alg: str, threshold: float, o
     meta_bad += [lf["k"] for lf in fresh["leaves"] if lf["k"].startswith("m:") and lf["k"] not in st]
     bad = [k for k, v in content.items() if v != "VERIFIED"]
     tiles = []
-    if content and len(bad) > len(content) / 2:
+    if content and len(bad) > len(content) / 2 and not in_bundle:
         # Recompressed (or re-encoded) copy: crypto can't say anything per tile; use the signed
         # perceptual thumbnails, advisory only.
         sp = {lf["k"]: bytes.fromhex(lf["v"]) for lf in signed if lf["k"].startswith("p:")}
@@ -187,10 +195,17 @@ def tile_map(signed_tiles: dict, candidate: bytes, alg: str, threshold: float, o
                           "confidence": round(min(1.0, d / (4 * threshold)), 3) if flagged else 0.0, "distance": round(d, 2)})
         verdict = "RECOMPRESSED"
     else:
+        sp = {lf["k"]: bytes.fromhex(lf["v"]) for lf in signed if lf["k"].startswith("p:")}
+        fp = {lf["k"]: bytes.fromhex(lf["v"]) for lf in fresh["leaves"] if lf["k"].startswith("p:")}
         for k, v in content.items():
             x, y = _tile_xy(k)
-            # SPEC §2.5: METADATA_CHANGED only when every pixel/coefficient tile verifies
-            tiles.append({"x": x, "y": y, "status": "METADATA_CHANGED" if v == "VERIFIED" and meta_bad and not bad else v})
+            tile_rec = {"x": x, "y": y, "status": "METADATA_CHANGED" if v == "VERIFIED" and meta_bad and not bad else v}
+            pk = "p:" + k[2:]
+            if pk in sp and pk in fp and len(sp[pk]) == len(fp[pk]):
+                d = float(np.abs(np.frombuffer(sp[pk], np.uint8).astype(int) - np.frombuffer(fp[pk], np.uint8).astype(int)).mean())
+                tile_rec["perceptual_distance"] = round(d, 2)
+                tile_rec["perceptual_likely_edited"] = d > threshold
+            tiles.append(tile_rec)
         verdict = "TAMPERED" if bad else ("METADATA_CHANGED" if meta_bad else "VERIFIED")
     return {"verdict": verdict, "tile": signed_tiles["tile"], "w": signed_tiles["w"], "h": signed_tiles["h"],
             "metadata_changed": sorted(set(meta_bad)), "tiles": tiles}

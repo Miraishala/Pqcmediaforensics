@@ -222,7 +222,8 @@ class _Opener:
         detail = ("segment file missing" if seg_missing else f"AEAD tag failed on chunk(s) {bad}") if bad else ""
         if repaired:
             detail = f"rebuilt chunk(s) {repaired} from {'/'.join(sorted(how))}" + (f"; {detail}" if detail else "")
-        return (None if bad else b"".join(parts)), repaired, bad, detail
+        partial = b"".join(parts[c] if parts[c] else b"\x00" * u["chunks"][c] for c in range(len(u["chunks"])))
+        return (None if bad else b"".join(parts)), repaired, bad, detail, partial
 
     def misplaced(self, i: int) -> int | None:
         """A file that fails under K_i but opens under K_j holds unit j: deleted/inserted/reordered."""
@@ -405,6 +406,19 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
             _tst_ok(rep, f"reseal {k}", rs_rec, reseal_msg(mh, rs_rec), None, trust, require=False)
         rep.reseals.append({kk: v for kk, v in rs_rec.items() if kk != "sig"} | {"valid": ok})
 
+    # custody log (SPEC §3.3, Deviation D5)
+    raw_custody = b.read("custody.log")
+    if raw_custody:
+        from evseal.dr import custody
+
+        try:
+            custody_recs = [json.loads(x) for x in raw_custody.decode().splitlines() if x.strip()]
+            problems = custody.check(custody_recs, trust)
+            rep.check("custody log", not problems, "; ".join(problems) if problems else "",
+                      info=f"{len(custody_recs)} chained custody record(s) verified")
+        except Exception as exc:
+            rep.check("custody log", False, f"malformed custody log: {exc}")
+
     # 3. expected unit set
     clip = m.get("clip")
     if clip:
@@ -460,16 +474,20 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
             ok = gaps.get(i) == u.get("gap") and dual_hash(GAP_PREFIX + u["gap"].encode(), algs) == r_s
             res.status, res.detail = ("GAP_DECLARED", u["gap"]) if ok else ("SEQUENCE_ERROR", "gap without a valid signed gap record")
             continue
-        pt, repaired, bad, detail = opener.open_unit(i, repair=False)
+        pt, repaired, bad, detail, partial = opener.open_unit(i, repair=False)
         if pt is None:
             j = opener.misplaced(i)  # before repair: a moved unit is manipulation, not damage to rebuild
             if j is not None:
                 res.status, res.detail = "SEQUENCE_ERROR", f"holds unit {j}'s sealed data (deleted/inserted/reordered)"
                 continue
-            pt, repaired, bad, detail = opener.open_unit(i, repair=True)
+            pt, repaired, bad, detail, partial = opener.open_unit(i, repair=True)
         res.repaired_chunks = repaired
         if pt is None:
             res.status, res.detail = "CORRUPT", detail
+            if "tiles" in u and tile_maps:
+                from evseal.media.image import tile_map
+
+                res.tiles = tile_map(u["tiles"], partial, alg_c, profile["image"]["likely_edited_threshold"], in_bundle=True)
             continue
         if len(pt) != u["len"]:
             res.status, res.detail = "TAMPERED", "length differs from the sealed unit"
@@ -485,7 +503,7 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
                 if root_ok and tile_maps:
                     from evseal.media.image import tile_map  # format logic stays in media/
 
-                    res.tiles = tile_map(u["tiles"], pt, alg_c, profile["image"]["likely_edited_threshold"])
+                    res.tiles = tile_map(u["tiles"], pt, alg_c, profile["image"]["likely_edited_threshold"], in_bundle=True)
                 continue
         elif r != r_s:
             res.status, res.detail = "TAMPERED", "decrypts cleanly but R_i differs from the signed value (re-encrypted edit)"
