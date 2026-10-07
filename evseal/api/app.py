@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import queue
 import random
 import re
@@ -17,11 +18,13 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from evseal import access
+from evseal.api import auth
 from evseal.core import crypto
 from evseal.core import profile as prof
 from evseal.core.clip import make_clip
@@ -34,6 +37,119 @@ from evseal.workspace import Workspace
 
 app = FastAPI(title="EviSeal")
 WS = Workspace()
+COOKIE = "evseal_session"
+
+
+def _auth_off() -> bool:
+    return os.environ.get("EVSEAL_AUTH") == "off"  # dev/test only: no login, no per-user signing
+
+
+def _session(request: Request):
+    return getattr(request.state, "session", None)
+
+
+def _actor(request: Request):
+    """The signing key for custody records written on this request: the logged-in user's own key.
+    With authentication off (dev) fall back to the first workspace root key."""
+    s = _session(request)
+    if s is not None:
+        return s.kp
+    keys = [k for k in WS.list_keys() if k["has_private"]]
+    return WS.root(keys[0]["name"]) if keys else None
+
+
+@app.middleware("http")
+async def access_guard(request: Request, call_next):
+    path = request.url.path
+    request.state.session = None
+    if not path.startswith("/api/") or path.startswith("/api/auth/") or _auth_off():
+        return await call_next(request)
+    try:
+        d = auth.SESSIONS.directory(WS)
+    except access.AccessError as exc:
+        return JSONResponse({"detail": f"access log invalid: {exc}"}, status_code=503)
+    if d is None:
+        return JSONResponse({"detail": "no users yet: run `evseal user-init ADMIN` (or set EVSEAL_AUTH=off for dev)"}, status_code=503)
+    sess = auth.SESSIONS.get(request.cookies.get(COOKIE))
+    if sess is None:
+        return JSONResponse({"detail": "authentication required"}, status_code=401)
+    perm = auth.perm_for(request.method, path)
+    try:
+        user = access.authorize(d, sess.user.id, perm)  # live directory: a revocation or role change bites immediately
+    except access.Denied as exc:
+        access.record(WS.home, sess.user, sess.kp, "denied", {"perm": perm, "method": request.method, "path": path})
+        auth.SESSIONS.own_append(WS)
+        return JSONResponse({"detail": str(exc)}, status_code=403)
+    if perm in access.LOGGED:  # signed intent is on record before the action runs
+        access.record(WS.home, user, sess.kp, "act", {"perm": perm, "method": request.method, "path": path})
+        auth.SESSIONS.own_append(WS)
+    request.state.session = sess
+    return await call_next(request)
+
+
+@app.post("/api/auth/login")
+def login(body: dict, request: Request):
+    try:
+        tok = auth.SESSIONS.login(WS, str(body.get("user", "")), body.get("passphrase") or None)
+    except auth.Throttled as exc:
+        raise HTTPException(429, str(exc))
+    except (access.Denied, access.AccessError):
+        raise HTTPException(401, "login failed")
+    except FileNotFoundError:
+        raise HTTPException(401, "login failed")
+    r = JSONResponse({"ok": True})
+    r.set_cookie(COOKIE, tok, httponly=True, samesite="strict", max_age=auth.TTL_S)
+    return r
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    auth.SESSIONS.logout(WS, request.cookies.get(COOKIE))
+    r = JSONResponse({"ok": True})
+    r.delete_cookie(COOKIE)
+    return r
+
+
+@app.get("/api/auth/session")
+def session(request: Request):
+    if _auth_off():
+        return {"auth": "off", "user": None}
+    s = auth.SESSIONS.get(request.cookies.get(COOKIE))
+    try:
+        d = auth.SESSIONS.directory(WS)
+    except access.AccessError:
+        d = None
+    if s is None:
+        return {"auth": "on", "user": None, "setup_needed": d is None}
+    perms = sorted(p for p, roles in access.PERMS.items() if s.user.role in roles)
+    return {"auth": "on", "user": s.user.id, "role": s.user.role, "permissions": perms}
+
+
+@app.get("/api/audit/users")
+def audit_users():
+    d = auth.SESSIONS.directory(WS)
+    return {"users": [u.public() for u in d.users.values()] if d else []}
+
+
+@app.get("/api/audit/log")
+def audit_log(limit: int = 100):
+    from evseal.dr import custody
+
+    d = auth.SESSIONS.directory(WS)  # replays the whole log: raises if it was tampered with
+    recs = custody.entries(WS.home, access.LOG)
+    return {"intact": d is not None, "entries": len(recs), "tail": recs[-max(1, min(limit, 1000)):]}
+
+
+@app.get("/api/bundles/{name}/court-report")
+def court_report(name: str, custodian: str = "", designation: str = "", organisation: str = "", device: str = "", place: str = ""):
+    from evseal.report import build_report, render_markdown
+
+    r = build_report(_bundle(name), WS.trust(), custodian=custodian, designation=designation,
+                     organisation=organisation, device=device, place=place)
+    return Response(render_markdown(r), media_type="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-report.md"'})
+
+
 _NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 _jobs: dict[str, dict] = {}
 _cache: dict[str, tuple[float, dict, dict]] = {}  # bundle -> (mtime, report, image plaintexts)
@@ -215,12 +331,14 @@ class SealBody(BaseModel):
     name: str | None = None
 
 
-def _run_seal(job: dict, src: Path, p: dict, key: str, out: Path):
+def _run_seal(job: dict, src: Path, p: dict, key: str, out: Path, sess=None):
     def progress(stage, done, total):
         job["events"].put({"stage": stage, "done": done, "total": total, "t": time.time()})
 
     try:
         seal_path(src, p, WS.root(key), out, tsa=WS.tsa(), anchor_log=WS.anchor_log(), progress=progress)
+        if sess is not None:
+            access.attest_seal(out, sess.user, sess.kp)  # the operator signs what was sealed (non-repudiation)
         job["status"] = "done"
     except Exception as exc:
         job["status"] = "error"
@@ -230,7 +348,7 @@ def _run_seal(job: dict, src: Path, p: dict, key: str, out: Path):
 
 
 @app.post("/api/seal")
-def seal(body: SealBody):
+def seal(body: SealBody, request: Request):
     up = WS.home / "uploads" / _safe(body.upload_id)
     files = sorted(up.iterdir()) if up.is_dir() else []
     if not files:
@@ -252,7 +370,7 @@ def seal(body: SealBody):
     jid = uuid.uuid4().hex[:12]
     job = {"id": jid, "bundle": name, "status": "running", "events": queue.Queue(), "error": None}
     _jobs[jid] = job
-    threading.Thread(target=_run_seal, args=(job, src, p, body.key, out), daemon=True).start()
+    threading.Thread(target=_run_seal, args=(job, src, p, body.key, out, _session(request)), daemon=True).start()
     return {"job": jid, "bundle": name}
 
 
@@ -436,9 +554,8 @@ def repair_plan(name: str):
 
 
 @app.post("/api/bundles/{name}/repair/run")
-def repair_run(name: str):
-    keys = [k for k in WS.list_keys() if k["has_private"]]
-    actor = WS.root(keys[0]["name"]) if keys else None
+def repair_run(name: str, request: Request):
+    actor = _actor(request)
     before, after, units = rep_mod.run(_bundle(name), WS.trust(), actor=actor)
     _cache.pop(name, None)
     return {"before": before.overall, "after": after.overall, "repaired": units, "report": _verify(name, force=True)[0]}
@@ -556,12 +673,11 @@ class DrSplitBody(BaseModel):
 
 
 @app.post("/api/bundles/{name}/dr/split")
-def bundle_dr_split(name: str, body: DrSplitBody):
+def bundle_dr_split(name: str, body: DrSplitBody, request: Request):
     from evseal.dr.split import split_bundle
 
     b = _bundle(name)
-    keys = [k for k in WS.list_keys() if k["has_private"]]
-    actor = WS.root(keys[0]["name"]) if keys else None
+    actor = _actor(request)
     out_dir = WS.home / "dr_shards" / _safe(name)
     shards = split_bundle(b, k=body.k, n=body.n, out_dir=out_dir, actor=actor)
     return {"bundle": name, "k": body.k, "n": body.n, "shards": [s.name for s in shards]}
@@ -573,14 +689,13 @@ class DrRecoverBody(BaseModel):
 
 
 @app.post("/api/dr/recover")
-def bundle_dr_recover(body: DrRecoverBody):
+def bundle_dr_recover(body: DrRecoverBody, request: Request):
     from evseal.dr.split import recover_bundle
 
     shards_dir = WS.home / "dr_shards" / _safe(body.shards_bundle)
     if not shards_dir.is_dir():
         raise HTTPException(404, "no shards found for bundle")
-    keys = [k for k in WS.list_keys() if k["has_private"]]
-    actor = WS.root(keys[0]["name"]) if keys else None
+    actor = _actor(request)
     out_bundle = WS.home / "bundles" / _safe(body.out_name)
     recover_bundle(shards_dir, out_bundle, actor=actor)
     _cache.pop(body.out_name, None)

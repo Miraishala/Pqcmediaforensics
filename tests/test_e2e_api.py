@@ -24,6 +24,9 @@ from evseal.workspace import Workspace
 
 @pytest.fixture(scope="module")
 def live_server(tmp_path_factory):
+    import os
+
+    os.environ["EVSEAL_AUTH"] = "off"  # this file exercises the endpoints; roles are covered in test_api_auth.py
     workdir = tmp_path_factory.mktemp("e2e_home")
     ws = Workspace(workdir)
     api_app.WS = ws
@@ -56,6 +59,7 @@ def live_server(tmp_path_factory):
 
     server.should_exit = True
     thread.join(timeout=2)
+    os.environ.pop("EVSEAL_AUTH", None)
 
 
 def _http(url: str, method: str = "GET", data: dict | None = None, headers: dict | None = None) -> tuple[int, dict | str]:
@@ -194,7 +198,7 @@ def test_05_bundle_verify_and_manifest(live_server):
 
     status, man = _http(f"{live_server['url']}/api/bundles/e2e-bundle/manifest")
     assert status == 200
-    assert man["manifest"]["format"] == "evseal-bundle-v1"
+    assert man["manifest"]["format"] == "evseal-bundle-v2"
 
 
 def test_06_clip_and_open(live_server):

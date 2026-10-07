@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 evseal = "evseal.cli:app"
+evseal-verify = "evseal.verify_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["evseal"]

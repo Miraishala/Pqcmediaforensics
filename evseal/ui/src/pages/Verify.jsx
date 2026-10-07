@@ -251,6 +251,7 @@ export default function Verify({ params }) {
             <Verdict overall={report.overall} sub={`${report.media.kind} · ${report.media.source_name || ''}${report.clip ? ` · clip of units ${report.clip.i}–${report.clip.j}` : ''} · manifest from ${report.manifest_source}`} />
             <div className="flex items-center gap-2">
               <button className="btn-ghost" onClick={exportJson}>⭳ Export report JSON</button>
+              <a className="btn-ghost" href={`/api/bundles/${enc(bundle)}/court-report`} download>⚖ Court report (draft)</a>
               <button className="btn-ghost" onClick={() => go('clip', { b: bundle })}>✂ Clip & Open</button>
               {Object.keys(report.counts).some((s) => s === 'CORRUPT' || s === 'REPAIRED') && <button className="btn-ghost" onClick={() => go('repair', { b: bundle })}>↻ Repair</button>}
             </div>
