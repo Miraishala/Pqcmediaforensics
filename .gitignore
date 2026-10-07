@@ -20,3 +20,23 @@ node_modules/
 # ui build + workspace
 evseal/ui/dist/
 .evseal-demo/
+
+# test/tool caches
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# python envs and secrets
+.venv/
+venv/
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
