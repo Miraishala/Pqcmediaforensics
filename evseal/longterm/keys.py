@@ -10,6 +10,8 @@ keys exist only in memory and are wiped at period end (forward security).
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,12 +26,21 @@ class KeyPair:
     pk: bytes
     sk: bytearray
     name: str = ""
+    signer: list[str] | None = None  # external signer command (HSM / TPM / gateway): the private key never enters this process
 
     @property
     def fp(self) -> str:
         return crypto.fingerprint(self.pk)
 
     def sign(self, msg: bytes) -> bytes:
+        if self.signer:
+            # Protocol: message on stdin, algorithm in EVSEAL_SIGN_ALG, raw signature on stdout, non-zero exit = refusal.
+            r = subprocess.run(self.signer, input=msg, capture_output=True, env={**os.environ, "EVSEAL_SIGN_ALG": self.alg})
+            if r.returncode != 0 or not r.stdout:
+                raise RuntimeError(f"external signer failed ({r.returncode}): {r.stderr.decode(errors='replace')[:200]}")
+            if not crypto.verify(self.alg, self.pk, msg, r.stdout):  # a bad signer must fail now, not at verify time
+                raise RuntimeError("external signer returned a signature that does not verify under the registered public key")
+            return r.stdout
         if not self.sk:
             raise RuntimeError("key already wiped (forward security)")
         return crypto.sign(self.alg, bytes(self.sk), msg)
@@ -48,20 +59,44 @@ def generate(alg: str, name: str = "") -> KeyPair:
     return KeyPair(alg, pk, bytearray(sk), name)
 
 
-def save(kp: KeyPair, out_dir: Path) -> tuple[Path, Path]:
-    """Write <name>.pub.json and <name>.key.json (DEV-ONLY file-based private key)."""
+def save(kp: KeyPair, out_dir: Path, passphrase: str | None = None) -> tuple[Path, Path]:
+    """Write <name>.pub.json and <name>.key.json (file-based private key; encrypted at rest when a passphrase is given)."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     pub = out_dir / f"{kp.name}.pub.json"
     key = out_dir / f"{kp.name}.key.json"
     pub.write_text(json.dumps(kp.public(), indent=1))
-    key.write_text(json.dumps({**kp.public(), "sk": bytes(kp.sk).hex(), "warning": "DEV-ONLY file-based private key"}))
+    if passphrase:
+        body = {**kp.public(), "enc": crypto.wrap_secret(passphrase, bytes(kp.sk), kp.pk), "warning": "passphrase-protected file-based private key"}
+    else:
+        body = {**kp.public(), "sk": bytes(kp.sk).hex(), "warning": "DEV-ONLY file-based private key"}
+    key.write_text(json.dumps(body))
     return pub, key
 
 
-def load_private(path: Path) -> KeyPair:
+def register_external(name: str, pub: dict, cmd: list[str], out_dir: Path) -> tuple[Path, Path]:
+    """Register a key whose private half lives in an external signer. Writes <name>.pub.json and a
+    <name>.key.json holding only the signer command (never any private key material)."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pub_rec = {"alg": pub["alg"], "pk": pub["pk"], "fp": crypto.fingerprint(bytes.fromhex(pub["pk"])), "name": name}
+    p, k = out_dir / f"{name}.pub.json", out_dir / f"{name}.key.json"
+    p.write_text(json.dumps(pub_rec, indent=1))
+    k.write_text(json.dumps({**pub_rec, "signer": {"cmd": cmd}, "warning": "private key held by an external signer"}))
+    return p, k
+
+
+def load_private(path: Path, passphrase: str | None = None) -> KeyPair:
     d = json.loads(Path(path).read_text())
-    return KeyPair(d["alg"], bytes.fromhex(d["pk"]), bytearray.fromhex(d["sk"]), d.get("name", ""))
+    if "signer" in d:
+        return KeyPair(d["alg"], bytes.fromhex(d["pk"]), bytearray(), d.get("name", ""), signer=list(d["signer"]["cmd"]))
+    if "enc" in d:
+        if not passphrase:
+            raise ValueError(f"{Path(path).name} is passphrase-protected: set EVSEAL_KEY_PASSPHRASE")
+        sk = bytearray(crypto.unwrap_secret(passphrase, d["enc"], bytes.fromhex(d["pk"])))
+    else:
+        sk = bytearray.fromhex(d["sk"])
+    return KeyPair(d["alg"], bytes.fromhex(d["pk"]), sk, d.get("name", ""))
 
 
 def load_public(path: Path) -> dict:
@@ -87,9 +122,13 @@ class Trust:
 
     roots: dict[str, dict] = field(default_factory=dict)  # fp -> public record
     tsas: dict[str, dict] = field(default_factory=dict)
+    actors: dict[str, dict] = field(default_factory=dict)  # fp -> public record of users who may sign custody records (never roots)
+    require_operator: bool = False  # policy: a bundle must carry a valid operator `seal` attestation to be VERIFIED
     allow_classical: bool = False  # Ed25519-only is NON-PQ: rejected unless explicitly allowed
     anchor_log: Path | None = None  # external anchor log to cross-check (SPEC §3.2 last line of defense)
     revocations: dict[str, float] = field(default_factory=dict)  # key fp -> revoked-at unix time (SPEC §10)
+    tsa_ca_file: Path | None = None  # PEM bundle of trusted RFC 3161 TSA CA certificates; None = such tokens cannot verify
+    slack_s: float = 300.0  # allowed skew between a timestamp token and its signing key's validity window
 
     @classmethod
     def from_paths(cls, roots=(), tsas=(), **kw) -> "Trust":

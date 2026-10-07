@@ -11,6 +11,6 @@ from evseal.media.common import segment_file
 
 def segment_video(path: Path, profile: dict) -> SourceUnits:
     s = profile["segment"]
-    su = segment_file(path, s["duration_s"], s["mode"], s["assumed_fps"])
+    su = segment_file(path, s["duration_s"], s["mode"], s["assumed_fps"], s.get("max_unit_mb", 0))
     su.kind = "video"
     return su

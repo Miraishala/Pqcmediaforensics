@@ -230,10 +230,12 @@ def forge_with_leaked_key(bdir, rng, ctx, unit=None):
     c_prev = _signed_c(m, i - 1)
     r_new = dual_hash(pt, p["hash"]["content"])
     c_new = chain_step(i, r_new, c_prev, p["hash"]["chain"])
+    old = next(r for r in m["records"] if r.get("type") == "block" and r["i_start"] <= i <= r["i_end"])
+    tt = [old["T"][i - old["i_start"]]] if "T" in old else None  # format v2 signs unit times too
     m["records"] = [r for r in m["records"] if not (r.get("type") == "block" and r["i_start"] <= i <= r["i_end"])]
-    sig = leaked.sign(block_msg(rid, i, i, [r_new], [c_new]))
+    sig = leaked.sign(block_msg(rid, i, i, [r_new], [c_new], tt))
     m["records"].append({"type": "block", "i_start": i, "i_end": i, "R": [r_new.hex()], "C": [c_new.hex()],
-                         "cert": "eph-0", "sig": sig.hex()})
+                         **({"T": tt} if tt else {}), "cert": "eph-0", "sig": sig.hex()})
     key, nonce = derive_key_nonce(c_new, rid, i, p["kdf"]["alg"])
     (Path(bdir) / seg_name(i)).write_bytes(seal_chunk(p["aead"]["alg"], key, nonce, 0, pt, aad(rid, i)))
     meta = next(u for u in m["units"] if u["i"] == i)

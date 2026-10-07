@@ -19,6 +19,7 @@ packet is a keyframe), targeting the requested duration. Bytes before the first 
 
 from __future__ import annotations
 
+import bisect
 import json
 import subprocess
 import tempfile
@@ -102,7 +103,88 @@ def _cut_times(packets, streams, duration_s, assumed_fps) -> tuple[list[tuple[in
     return cuts, timed[-1][0] + step
 
 
-def segment_bytes(path: Path, duration_s: float, assumed_fps: float = 0.0) -> SourceUnits:
+_TS = 188
+
+
+def _ts_pid(data: bytes, i: int) -> tuple[int, bool]:
+    return ((data[i + 1] & 0x1F) << 8) | data[i + 2], bool(data[i + 1] & 0x40)
+
+
+def _ts_pes_pids(data: bytes, limit: int = 20000) -> set[int]:
+    """PIDs that carry PES (a payload-unit-start packet whose payload begins 00 00 01)."""
+    pids = set()
+    for i in range(0, min(len(data) - _TS + 1, limit * _TS), _TS):
+        pid, pusi = _ts_pid(data, i)
+        if not pusi or pid in (0, 0x1FFF):
+            continue
+        off = i + 4 + ((1 + data[i + 4]) if data[i + 3] & 0x20 else 0)
+        if data[off : off + 3] == b"\x00\x00\x01":
+            pids.add(pid)
+    return pids
+
+
+def _ts_clean_cut(data: bytes, pos: int, lo: int, pids: set[int]) -> int:
+    """Nearest TS-packet boundary in [lo, pos] where no PES on any PID straddles the cut (SPEC §9.1,
+    Deviation D1): at the cut, the next packet of every PES PID must start a PES. Searching backwards
+    from the keyframe means the unit may open with a few pre-keyframe frames a decoder skips, but audio
+    is never split mid-PES. Returns `pos` unchanged if there is no such boundary."""
+    state: dict[int, bool] = {}
+    j = pos + _TS
+    while len(state) < len(pids) and j + _TS <= len(data) and j < pos + 4000 * _TS:
+        pid, pusi = _ts_pid(data, j)
+        if pid in pids and pid not in state:
+            state[pid] = pusi
+        j += _TS
+    for p in pids:
+        state.setdefault(p, True)  # no later packet on that PID: nothing can straddle
+    i = pos
+    while i >= lo:
+        pid, pusi = _ts_pid(data, i)
+        if pid in pids:
+            state[pid] = pusi
+        if all(state.values()):
+            return i
+        i -= _TS
+    return pos
+
+
+def _ts_adjust(data: bytes, starts: list[tuple[int, float]]) -> list[tuple[int, float]]:
+    if len(data) < 2 * _TS or data[0] != 0x47 or data[_TS] != 0x47:
+        return starts
+    pids = _ts_pes_pids(data)
+    if len(pids) < 2:
+        return starts  # a single PES stream cannot straddle another
+    out = [starts[0]]
+    for pos, t in starts[1:]:
+        lo = max(out[-1][0] + _TS, pos - (pos - out[-1][0]) // 2)  # never eat more than half the previous unit
+        lo += (-lo) % _TS
+        new = _ts_clean_cut(data, pos, lo, pids) if pos % _TS == 0 else pos
+        out.append((new, t))
+    return out
+
+
+def _split_oversized(starts, pkt_pos, last_end, total_t, cap):
+    """Add cuts at packet boundaries inside any unit longer than `cap` bytes (VFR / long-GOP footage).
+    ponytail: the extra cuts are not keyframes (a clip starting there needs the previous GOP) and their
+    start times are interpolated by byte share. Upgrade path: parse the stream for the true packet time."""
+    if not cap:
+        return starts
+    out = []
+    for n, (pos, t) in enumerate(starts):
+        end = starts[n + 1][0] if n + 1 < len(starts) else last_end
+        nxt_t = starts[n + 1][1] if n + 1 < len(starts) else total_t
+        out.append((pos, t))
+        cur = pos
+        while end - cur > cap:
+            j = bisect.bisect_left(pkt_pos, cur + cap)
+            if j >= len(pkt_pos) or pkt_pos[j] >= end:
+                break
+            cur = pkt_pos[j]
+            out.append((cur, t + (nxt_t - t) * (cur - pos) / (end - pos)))
+    return out
+
+
+def segment_bytes(path: Path, duration_s: float, assumed_fps: float = 0.0, max_unit_bytes: int = 0) -> SourceUnits:
     path = Path(path)
     data = path.read_bytes()
     packets, streams, fmt = probe(path)
@@ -123,10 +205,13 @@ def segment_bytes(path: Path, duration_s: float, assumed_fps: float = 0.0) -> So
         starts = [(first, 0.0)]
     starts[0] = (first, 0.0)  # packets before the first keyframe (e.g. leading audio) join unit 1
 
+    pkt_pos = sorted({p.pos for p in packets})
+    if "mpegts" in (fmt.get("format_name") or ""):
+        starts = _ts_adjust(data, starts)
+    starts = _split_oversized(starts, pkt_pos, last_end, total_t, max_unit_bytes)
     units: list[Unit] = []
     if first > 0:
         units.append(Unit(data=data[:first], role="header", offset=0))
-    pkt_pos = sorted({p.pos for p in packets})
     for n, (pos, t) in enumerate(starts):
         end = starts[n + 1][0] if n + 1 < len(starts) else last_end
         nxt_t = starts[n + 1][1] if n + 1 < len(starts) else total_t
@@ -162,21 +247,70 @@ def segment_remux(path: Path, duration_s: float) -> SourceUnits:
     return SourceUnits(kind="", units=units, info={"container": "mpegts", "segment_mode": "remux", "duration_s": round(t, 6)})
 
 
-def segment_file(path: Path, duration_s: float, mode: str = "byte-range", assumed_fps: float = 0.0) -> SourceUnits:
+def segment_file(path: Path, duration_s: float, mode: str = "byte-range", assumed_fps: float = 0.0,
+                 max_unit_mb: float = 0) -> SourceUnits:
     if mode == "remux":
         return segment_remux(path, duration_s)
-    return segment_bytes(path, duration_s, assumed_fps)
+    return segment_bytes(path, duration_s, assumed_fps, int(max_unit_mb * 1048576))
+
+
+_MP4_CONTAINERS = (b"moov", b"trak", b"mdia", b"minf", b"stbl")
+
+
+def _rewrite_mp4_offsets(data: bytearray, units: list[dict]) -> None:
+    """Shift stco/co64 chunk offsets in a clip's moov from original-file positions to clip-file
+    positions, in place (entry sizes never change). Samples outside the clip map to 0: the
+    preview's time range excludes them, so they are never read."""
+    spans, new = [], 0
+    for u in sorted(units, key=lambda u: u["i"]):
+        spans.append((u["off"], u["off"] + u["len"], new, u["role"]))
+        new += u["len"]
+
+    data_end = next((n for _, _, n, role in spans if role == "trailer"), new)
+
+    def remap(o: int) -> int:
+        for a, b, n, _ in spans:
+            if a <= o < b:
+                return n + o - a
+        return 0
+
+    def walk(start: int, end: int) -> None:
+        i = start
+        while i + 8 <= end:
+            size, typ, hdr = int.from_bytes(data[i : i + 4], "big"), bytes(data[i + 4 : i + 8]), 8
+            if size == 1:
+                size, hdr = int.from_bytes(data[i + 8 : i + 16], "big"), 16
+            elif size == 0:
+                size = end - i
+            if size < hdr:
+                break
+            if i + size > end:
+                if typ == b"mdat":  # sized for the whole original file: shrink it to the clip's sample bytes
+                    if hdr == 8:
+                        data[i : i + 4] = (data_end - i).to_bytes(4, "big")
+                    else:
+                        data[i + 8 : i + 16] = (data_end - i).to_bytes(8, "big")
+                break
+            if typ in _MP4_CONTAINERS:
+                walk(i + hdr, i + size)
+            elif typ in (b"stco", b"co64"):
+                w, p = (4 if typ == b"stco" else 8), i + hdr + 8
+                for _ in range(int.from_bytes(data[i + hdr + 4 : i + hdr + 8], "big")):
+                    data[p : p + w] = remap(int.from_bytes(data[p : p + w], "big")).to_bytes(w, "big")
+                    p += w
+            i += size
+
+    for a, b, n, role in spans:
+        if role in ("header", "trailer"):
+            walk(n, n + (b - a))
 
 
 def make_preview(restored: Path, units: list[dict], report, out_dir: Path) -> Path:
     """Playable preview (SPEC §6 Clip & Open) next to the bit-exact restored file.
 
     A clip of an MP4/MOV keeps the original moov, whose sample offsets point into the full
-    file, so its bytes are laid back at their original offsets (zero-filled elsewhere) before
-    ffmpeg stream-copies the clip's time range. TS / fMP4 / raw / audio clips play as-is.
-
-    # ponytail: the sparse layout is as large as the original file. Upgrade path: rewrite
-    # stco/co64 offsets in the clip's moov instead.
+    file, so a compact copy with the moov's stco/co64 offsets rewritten is made before ffmpeg
+    stream-copies the clip's time range. TS / fMP4 / raw / audio clips play as-is.
     """
     kind = report.media.get("kind")
     container = (report.media.get("info") or {}).get("container") or ""
@@ -184,16 +318,11 @@ def make_preview(restored: Path, units: list[dict], report, out_dir: Path) -> Pa
     pre_in: list[str] = []
     if report.clip:
         if any(x in container for x in ("mp4", "mov")) and any(u.get("role") == "header" for u in units):
-            sparse = Path(out_dir) / ".sparse.bin"
-            data = src.read_bytes()
-            with open(sparse, "wb") as f:
-                f.truncate(max(u["off"] + u["len"] for u in units))
-                pos = 0
-                for u in sorted(units, key=lambda u: u["i"]):
-                    f.seek(u["off"])
-                    f.write(data[pos : pos + u["len"]])
-                    pos += u["len"]
-            src = sparse
+            compact = Path(out_dir) / ".compact.mp4"
+            data = bytearray(src.read_bytes())
+            _rewrite_mp4_offsets(data, units)
+            compact.write_bytes(data)
+            src = compact
         pre_in = ["-ss", str(report.clip["t_from"]), "-to", str(report.clip["t_to"])]
     out = Path(out_dir) / ("preview.mp4" if kind == "video" else "preview.m4a")
     base = ["ffmpeg", "-y", "-v", "error", "-fflags", "+genpts+discardcorrupt", *pre_in, "-i", str(src)]
@@ -207,6 +336,6 @@ def make_preview(restored: Path, units: list[dict], report, out_dir: Path) -> Pa
         err = r.stderr[-500:]
     else:
         raise RuntimeError(f"preview failed: {err}")
-    if src.name == ".sparse.bin":
+    if src.name == ".compact.mp4":
         src.unlink(missing_ok=True)
     return out

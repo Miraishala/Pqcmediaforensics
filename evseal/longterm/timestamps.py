@@ -5,10 +5,14 @@
 - Non-empty: an RFC 3161 TimeStampReq is POSTed to each URL; the token is stored verbatim
   (base64 DER) with its genTime and messageImprint parsed out and checked.
 
-# ponytail: the RFC 3161 token's CMS signature (classical RSA/ECDSA) is NOT verified — no
-# stdlib/`cryptography` API for CMS SignedData. Fail closed: such a token is reported
-# "unverified" and blocks a VERIFIED verdict. Upgrade path: asn1crypto/`openssl ts -verify`.
-# Offline queueing (SPEC §10) is also not implemented: an unreachable TSA fails the seal.
+# RFC 3161 tokens are verified with `openssl ts -verify` against Trust.tsa_ca_file, at the token's own
+# genTime (so an expired TSA certificate still verifies old evidence). No CA file, or no openssl,
+# means the token is unverified and blocks VERIFIED (fail closed).
+# Offline queueing (SPEC §10): an unreachable TSA yields a "queued" token (not verifiable);
+# `flush_queue` stamps it later and records the delay. The signed record excludes `tst`, so late
+# stamping never invalidates a signature.
+# ponytail: RSA/ECDSA TSA signatures are classical (not post-quantum). Upgrade path: a PQ TSA, or a
+# reseal with a PQ-signed local TSA token over the same manifest hash.
 """
 
 from __future__ import annotations
@@ -17,6 +21,9 @@ import base64
 import hashlib
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -134,11 +141,65 @@ def rfc3161_stamp(url: str, msg: bytes) -> dict:
             "parsed_imprint": digest.hex() if digest else None}
 
 
+def _queued(url: str, msg: bytes, exc: Exception) -> dict:
+    return {"kind": "queued", "url": url, "imprint": imprint(msg).hex(), "queued_at": round(time.time(), 3), "error": str(exc)[:200]}
+
+
 def stamp(profile: dict, msg: bytes, local: LocalTSA | None) -> list[dict]:
     urls = profile["timestamps"]["tsa_urls"]
     if urls:
-        return [rfc3161_stamp(u, msg) for u in urls]
+        out = []
+        for u in urls:
+            try:
+                out.append(rfc3161_stamp(u, msg))
+            except OSError as exc:  # unreachable TSA (field recorder without uplink): queue, never block sealing
+                out.append(_queued(u, msg, exc))
+        if local is not None:
+            out.append(local.stamp(msg))  # post-quantum witness next to the classical RFC 3161 token(s)
+        return out
     return [local.stamp(msg)] if local is not None else []
+
+
+def _openssl_verify(der: bytes, digest_hex: str, ca_file: Path, gen: float) -> tuple[bool, str]:
+    exe = shutil.which("openssl")
+    if exe is None:
+        return False, "openssl not found: cannot verify the RFC 3161 CMS signature"
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "resp.tsr"
+        f.write_bytes(der)
+        r = subprocess.run([exe, "ts", "-verify", "-in", str(f), "-digest", digest_hex, "-CAfile", str(ca_file),
+                            "-attime", str(int(gen))], capture_output=True, text=True)
+    return r.returncode == 0, (r.stderr.strip().splitlines() or ["openssl ts -verify failed"])[-1]
+
+
+def flush_queue(bundle_dir: Path, profile: dict | None = None, *, stamper=rfc3161_stamp) -> int:
+    """Stamp every queued token in a bundle directory (records are unchanged: `tst` is unsigned).
+    Returns the number stamped. Refuses once a reseal exists, since reseals hash the whole manifest."""
+    from evseal.core.manifest import Bundle, checkpoint_msg, final_msg, hexb, write_manifest
+
+    b = Bundle(Path(bundle_dir))
+    m, _ = b.load_manifest()
+    if m is None:
+        raise ValueError("no readable manifest")
+    if m.get("reseals"):
+        raise ValueError("bundle already resealed: flush the queue before resealing")
+    rid, n = hexb(m["rid"]), 0
+    for r in m["records"]:
+        if r.get("type") == "final":
+            msg = final_msg(rid, int(r["n"]), hexb(r["C_n"]), hexb(r["file_hash"]))
+        elif r.get("type") == "checkpoint":
+            msg = checkpoint_msg(rid, int(r["i"]), hexb(r["C"]), int(r["count"]))
+        else:
+            continue
+        for k, tok in enumerate(r.get("tst") or []):
+            if tok.get("kind") == "queued":
+                new = stamper(tok["url"], msg)
+                new["queued_at"] = tok["queued_at"]
+                r["tst"][k] = new
+                n += 1
+    if n:
+        write_manifest(Path(bundle_dir), m)
+    return n
 
 
 def verify_token(tok: dict, msg: bytes, trust: keys.Trust) -> tuple[bool, float | None, str]:
@@ -156,7 +217,13 @@ def verify_token(tok: dict, msg: bytes, trust: keys.Trust) -> tuple[bool, float 
             digest, gen = rfc3161_parse(base64.b64decode(tok["der"]))
             if digest is None or digest.hex() != tok["imprint"]:
                 return False, gen, "RFC 3161 token imprint mismatch"
-            return False, gen, "RFC 3161 token: imprint ok, CMS signature not verified (unsupported)"
+            if trust.tsa_ca_file is None:
+                return False, gen, "RFC 3161 token: no TSA CA bundle configured, CMS signature not verified"
+            ok, why = _openssl_verify(base64.b64decode(tok["der"]), tok["imprint"], Path(trust.tsa_ca_file), gen or 0)
+            delay = f"; stamped {gen - tok['queued_at']:.0f}s after sealing (offline queue)" if ok and gen and tok.get("queued_at") else ""
+            return ok, gen, ("RFC 3161 token verified (classical, non-PQ TSA)" + delay) if ok else f"RFC 3161 token invalid: {why}"
+        if tok.get("kind") == "queued":
+            return False, None, "timestamp still queued: the TSA was unreachable at seal time (run the queue flush)"
     except (KeyError, ValueError, TypeError):
         pass
     return False, None, "malformed timestamp token"

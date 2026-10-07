@@ -57,7 +57,7 @@ Steps for each unit *i*:
 1. `R_i = H1(S_i) ‖ H2(S_i)`
 2. `C_0 = Hc("evseal-v1" ‖ rid ‖ profile_hash)`; `C_i = Hc(i ‖ R_i ‖ C_{i-1})`
 3. **Signed block** every `N` units (`sign.block_segments`, default 1):
-   `σ = Sign_eph(rid ‖ i_start ‖ i_end ‖ [R_i…] ‖ [C_i…])`.
+   `σ = Sign_eph(rid ‖ i_start ‖ i_end ‖ [R_i…] ‖ [C_i…] ‖ "evseal-timing" ‖ JCS([[t_i, dur_i]…]))` (bundle format v2; amendment A1 below — v1 bundles omit the timing term and still verify).
    Every `R_i` and `C_i` is stored and covered by a signature. A damaged unit therefore never breaks verification of later units, because the chain is checked against *signed* `C_{i-1}` and is never recomputed across damage.
 4. **Verify-to-open sealing (key idea).**
    - `(K_i, n_i) = HKDF(ikm=C_i, salt=rid, info="evseal-unit" ‖ i)`
@@ -479,6 +479,20 @@ Don't re-propose these without a new reason.
 - **Per-tile localization within a unit** (images now, video frames later) combining cryptographic and advisory-perceptual evidence
 
 **India context:** DST PQC migration roadmap — critical information infrastructure by 2029, broader adoption by 2033, cryptographic asset inventory and risk assessment due by end of 2026. CERT-In CBOM/QBOM guidelines (July 2025), BSA Section 63 certificates.
+
+## 14. Amendments (approved 2026-10-07)
+
+Approved by the project owner; each is implemented and tested. §2's chain, signing, AEAD, RS, checkpoint and rotation mechanics are otherwise unchanged.
+
+- **A1 (D6) — unit times are signed.** Format `evseal-bundle-v2`: a block signature also covers `"evseal-timing" ‖ JCS([[t_i, dur_i]…])`; the block record carries `T`. The verifier compares the manifest's per-unit `t`/`dur` with the signed values (mismatch → `TAMPERED`) and uses the signed `t` for the key validity window. `evseal-bundle-v1` bundles remain verifiable under the v1 message.
+- **A2 (D8) — canon:** domain tags on gap/cert/reseal messages (`evseal-gap`, `evseal-cert`, `evseal-reseal`); AEAD chunk nonce `n_i XOR chunk_index` (single-chunk units use bare `n_i`); profile knobs `segment.assumed_fps`, `segment.max_unit_mb`, `image.likely_edited_threshold`, `aead.chunk`, `image.aead_chunk_kb = 64`; `perceptual_hash = thumb8`.
+- **A3 — profile evolution.** Knobs added after bundles exist go in `profile.OPTIONAL`, so a verifier never rejects an older bundle for lacking them.
+- **A4 — revocation (§10).** A revoked key's signatures count only if a verified timestamp token proves they predate the revocation; otherwise the check fails closed.
+- **A8 — access management and non-repudiation.** Users hold roles (`admin`, `collector`, `examiner`, `custodian`, `auditor`; permission table in `evseal/access.py`). The directory is a signed, hash-chained `access.log`: entry 0 is a self-signed admin, every change is signed by an active admin, and any tampering invalidates the directory (access fails closed). Logins, privileged actions and denials are signed by the acting user's own key and logged before the action runs. The sealing operator signs a `seal` custody record (rid, C_n, original-file hash, user, role) that the verifier binds to the final seal; policy `Trust.require_operator` makes it mandatory. The API requires a login (sign in with the user's key); `EVSEAL_AUTH=off` is dev-only and `evseal serve` refuses a non-loopback address with it.
+- **A7 — external signers.** A key file may hold only a signer command (`longterm.keys.register_external`): the private key stays in an HSM / TPM / gateway process that speaks the stdin/stdout protocol in `KeyPair.sign`. `evseal/signer_stub.py` is a DEV stand-in that demonstrates the interface, not the protection.
+- **A6 — hybrid timestamps.** When RFC 3161 URLs are configured, the local post-quantum TSA also stamps every checkpoint and final seal, so a post-quantum time witness exists next to the classical token.
+- **A5 — timestamps.** RFC 3161 tokens verify with `openssl ts -verify` against a trusted CA bundle at the token's own `genTime`. An unreachable TSA queues the token (`kind = queued`, never verifiable); `evseal stamp-queue` stamps it later and the verifier reports the delay. Key-window slack is verifier policy (`Trust.slack_s`).
+
 
 ## 13. Parked ideas from the same research session (not EviSeal scope)
 

@@ -15,7 +15,6 @@ import os
 import shutil
 import tempfile
 import time
-import tracemalloc
 from pathlib import Path
 
 from evseal.bench.synth import make_media
@@ -34,6 +33,28 @@ except ImportError:
         return 0.0
 
 
+def environment(algs: set[str]) -> dict:
+    """Where a benchmark ran (CLAUDE.md: record CPU, liboqs version and algorithms with every result)."""
+    import platform
+    import subprocess
+
+    from evseal.core import crypto
+
+    cpu = platform.processor() or ""
+    try:
+        cpu = next(ln.split(":", 1)[1].strip() for ln in Path("/proc/cpuinfo").read_text().splitlines() if ln.startswith("model name"))
+    except (OSError, StopIteration):
+        pass
+    oqs = crypto._import_oqs()
+    try:
+        ffmpeg = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True).stdout.splitlines()[0]
+    except (OSError, IndexError):
+        ffmpeg = "unavailable"
+    return {"cpu": cpu, "cpu_count": os.cpu_count(), "platform": platform.platform(), "python": platform.python_version(),
+            "liboqs": oqs.oqs_version() if oqs else None, "ffmpeg": ffmpeg,
+            "backends": {a: (crypto.get_signature_backend(a)[1] or "unavailable") for a in sorted(algs)}}
+
+
 def run_sweep(
     media_path: Path | None = None,
     quick: bool = True,
@@ -41,6 +62,10 @@ def run_sweep(
     out_file: Path | None = None,
 ) -> list[dict]:
     """Run parameter sweep benchmark and return results list."""
+    used = {"ML-DSA-87", "ML-DSA-44", "ML-DSA-65", "Ed25519+ML-DSA-44", prof.DEFAULTS["checkpoint"]["alg"]}
+    env = environment(used)
+    if "pure-python" in env["backends"].values() and os.environ.get("EVSEAL_ALLOW_DEV_CRYPTO") != "1":
+        raise RuntimeError("refusing to benchmark on the DEV-ONLY pure-Python backend (CLAUDE.md); build liboqs natively")
     with tempfile.TemporaryDirectory() as td:
         tmp_dir = Path(td)
         ws_dir = tmp_dir / "bench_ws"
@@ -101,7 +126,6 @@ def run_sweep(
             if bundle_out.exists():
                 shutil.rmtree(bundle_out)
 
-            tracemalloc.start()
             t0 = time.perf_counter()
             c0 = time.process_time()
 
@@ -109,8 +133,6 @@ def run_sweep(
 
             c1 = time.process_time()
             t1 = time.perf_counter()
-            _, peak_traced = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
 
             wall_s = max(t1 - t0, 1e-6)
             cpu_s = c1 - c0
@@ -133,7 +155,8 @@ def run_sweep(
                 "cpu_time_s": round(cpu_s, 3),
                 "throughput_mb_s": round(mb_s, 2),
                 "realtime_x": round(rt_factor, 2),
-                "peak_ram_mb": round(max(peak_traced / (1024 * 1024), _peak_rss_mb()), 2),
+                "peak_ram_mb": round(_peak_rss_mb(), 2),  # process-wide peak RSS so far (tracemalloc would skew timings)
+                "environment": env,
                 "verified": rep.overall == "VERIFIED",
             }
             results.append(rec)

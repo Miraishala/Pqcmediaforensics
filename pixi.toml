@@ -7,7 +7,7 @@ version = "0.1.0"
 
 [tasks]
 ui-build = { cmd = "npm run build", cwd = "evseal/ui" }
-serve = { cmd = "evseal serve --port 8000", env = { EVSEAL_HOME = ".evseal-demo" } }
+serve = { cmd = "evseal serve --port 8000", env = { EVSEAL_HOME = ".evseal-demo", EVSEAL_ALLOW_DEV_CRYPTO = "1" } }
 
 [dependencies]
 python = "3.12.*"

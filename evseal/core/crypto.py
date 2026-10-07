@@ -362,6 +362,34 @@ def require_kem_backend(name: str) -> KemBackend:
     return backend
 
 
+def wrap_secret(passphrase: str, secret: bytes, aad: bytes) -> dict:
+    """Encrypt a private key at rest (scrypt-derived AES-256-GCM key). Returns a JSON-able blob."""
+    import os
+
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+    salt, nonce, n = os.urandom(16), os.urandom(AEAD_NONCE_LEN), 2**15
+    key = Scrypt(salt=salt, length=AEAD_KEY_LEN, n=n, r=8, p=1).derive(passphrase.encode())
+    ct = AEADS["AES-256-GCM"](key).encrypt(nonce, secret, aad)
+    return {"kdf": "scrypt", "n": n, "r": 8, "p": 1, "salt": salt.hex(), "nonce": nonce.hex(), "ct": ct.hex()}
+
+
+def unwrap_secret(passphrase: str, blob: dict, aad: bytes) -> bytes:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+    key = Scrypt(salt=bytes.fromhex(blob["salt"]), length=AEAD_KEY_LEN, n=blob["n"], r=blob["r"], p=blob["p"]).derive(passphrase.encode())
+    try:
+        return AEADS["AES-256-GCM"](key).decrypt(bytes.fromhex(blob["nonce"]), bytes.fromhex(blob["ct"]), aad)
+    except InvalidTag as exc:
+        raise ValueError("wrong passphrase or damaged key file") from exc
+
+
+def is_dev_only(alg: str) -> bool:
+    """True if `alg` would run on the DEV-ONLY pure-Python fallback (CLAUDE.md: never seal real evidence with it)."""
+    return get_signature_backend(alg)[1] == "pure-python"
+
+
 def _note(kind: str | None, missing: str) -> str:
     if kind is None:
         return missing

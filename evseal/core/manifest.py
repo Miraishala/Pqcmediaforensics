@@ -14,7 +14,8 @@ Bundle layout (SPEC §5):
   custody.log            signed, chained custody records (SPEC §3.3)
 
 Signed messages use the SPEC §2 layouts exactly, integers as 8-byte big-endian:
-  block       rid || i_start || i_end || R_i... || C_i...
+  block       rid || i_start || i_end || R_i... || C_i...                   (format v1)
+              ... || b"evseal-timing" || JCS([[t_i, dur_i], ...])           (format v2: unit times are signed, D6)
   checkpoint  rid || i || C_i || count
   final       rid || n || C_n || H(original input file)
 Records the SPEC doesn't lay out get a domain tag: b"evseal-gap", b"evseal-cert", b"evseal-reseal".
@@ -29,7 +30,9 @@ from pathlib import Path
 
 from evseal.core.profile import canonical_json
 
-FORMAT = "evseal-bundle-v1"
+FORMAT = "evseal-bundle-v2"
+FORMAT_V1 = "evseal-bundle-v1"  # still verifiable: block signatures without signed unit times
+READABLE = (FORMAT, FORMAT_V1)
 MANIFEST = "manifest.json"
 MANIFEST_COPY = "manifest.copy.json"
 JOURNAL = "journal.jsonl"
@@ -43,8 +46,10 @@ def _i(n: int) -> bytes:
     return int(n).to_bytes(8, "big")
 
 
-def block_msg(rid: bytes, i_start: int, i_end: int, rs: list[bytes], cs: list[bytes]) -> bytes:
-    return rid + _i(i_start) + _i(i_end) + b"".join(rs) + b"".join(cs)
+def block_msg(rid: bytes, i_start: int, i_end: int, rs: list[bytes], cs: list[bytes], ts: list | None = None) -> bytes:
+    """`ts` = [[t, dur], ...] per unit for format v2; None gives the v1 layout."""
+    msg = rid + _i(i_start) + _i(i_end) + b"".join(rs) + b"".join(cs)
+    return msg if ts is None else msg + b"evseal-timing" + jcs(ts)
 
 
 def checkpoint_msg(rid: bytes, i: int, c_i: bytes, count: int) -> bytes:
@@ -209,7 +214,7 @@ def _parse(raw: bytes) -> dict | None:
         m = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
         return None
-    return m if isinstance(m, dict) and m.get("format") == FORMAT else None
+    return m if isinstance(m, dict) and m.get("format") in READABLE else None
 
 
 def pack(bundle_dir: Path, out: Path) -> Path:

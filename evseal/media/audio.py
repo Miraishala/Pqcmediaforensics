@@ -10,6 +10,7 @@ from evseal.media.common import segment_file
 
 
 def segment_audio(path: Path, profile: dict) -> SourceUnits:
-    su = segment_file(path, profile["audio"]["segment_duration_s"], profile["segment"]["mode"])
+    su = segment_file(path, profile["audio"]["segment_duration_s"], profile["segment"]["mode"],
+                      max_unit_mb=profile["segment"].get("max_unit_mb", 0))
     su.kind = "audio"
     return su

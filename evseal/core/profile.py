@@ -14,7 +14,7 @@ from pathlib import Path
 from evseal.core import crypto
 
 DEFAULTS: dict = {
-    "segment": {"duration_s": 1.0, "mode": "byte-range", "assumed_fps": 0.0},
+    "segment": {"duration_s": 1.0, "mode": "byte-range", "assumed_fps": 0.0, "max_unit_mb": 64},
     "audio": {"segment_duration_s": 1.0},
     "image": {"set_order": "capture_time", "tile_px": 64, "perceptual_hash": "thumb8", "likely_edited_threshold": 10.0, "aead_chunk_kb": 64},
     "unit": {"container_map": {}},
@@ -51,9 +51,13 @@ PRESETS: dict[str, dict] = {
 _SIG = crypto.SIG_ALGS
 _PQ_SIG = [a for a in _SIG if crypto.security_class(a) != "classical"]
 # (group, key) -> ("num", lo, hi) | ("int", lo, hi) | ("enum", options) | ("list", options) | ("bool",) | ...
+# Knobs added after bundles already existed: a verifier must still accept bundles sealed without them
+# (they only steer sealing). Never remove an entry; add new seal-only knobs here.
+OPTIONAL: set[tuple[str, str]] = {("segment", "max_unit_mb")}
 SCHEMA: dict[tuple[str, str], tuple] = {
     ("segment", "duration_s"): ("num", 0.5, 10),
     ("segment", "mode"): ("enum", ["byte-range", "remux"]),
+    ("segment", "max_unit_mb"): ("num", 0, 4096),  # 0 = off; splits oversized (VFR / long-GOP) units at packet boundaries
     ("segment", "assumed_fps"): ("num", 0, 240),  # 0 = auto; raw elementary streams carry no timing
     ("audio", "segment_duration_s"): ("num", 0.5, 10),
     ("image", "set_order"): ("enum", ["capture_time", "filename"]),
@@ -95,7 +99,8 @@ def validate(profile: dict) -> tuple[list[str], list[str]]:
     errors, warnings = [], []
     for (g, k), rule in SCHEMA.items():
         if g not in profile or k not in profile[g]:
-            errors.append(f"{g}.{k}: missing")
+            if (g, k) not in OPTIONAL:
+                errors.append(f"{g}.{k}: missing")
             continue
         v, kind = profile[g][k], rule[0]
         name = f"{g}.{k}"

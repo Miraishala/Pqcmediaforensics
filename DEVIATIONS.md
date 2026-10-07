@@ -9,15 +9,10 @@ here marking it Fixed.
 ## D1 — TS segmentation: audio PES can straddle a cut boundary
 
 **SPEC §9.1:** cuts must land on packet boundaries of ALL streams.
-**Symptom:** for MPEG-TS the cutter picks the nearest video-keyframe TS packet; an audio
-PES spanning that cut loses a partial frame (bit-exact restore is OK; clip playback may drop
-one audio frame at the splice point).
-**Status:** Documented — not yet fixed.
-**Upgrade path:** Write a lightweight TS packet parser in `media/video.py` (PID + PUSI bits)
-that picks the nearest boundary with no PES straddling across *all* PIDs. If none exists
-in the interleaved TS, offer "remux mode" (stream-copy to independent TS segments) instead
-of guessing.
-
+**Status:** **Fixed** (2026-10-07) — `media/common.py::_ts_adjust` moves each MPEG-TS cut back (never more than half the previous unit)
+to the nearest packet boundary where no PES on any PID straddles it; if none exists the keyframe cut is kept. Units may then open with a few
+pre-keyframe frames a decoder skips. Test: `test_ts_clean_cut_moves_off_a_straddling_audio_pes` (hand-built TS). ffmpeg's own muxer already
+flushes audio before keyframes, so only other muxers (DVR/cameras) exercise this.
 ---
 
 ## D2 — Tile-level CORRUPT: whole-unit granularity on image parity failure
@@ -43,12 +38,11 @@ scenario covering re-saved images in bundles.
 
 ## D4 — RFC 3161 token: CMS signature not verified
 
-**SPEC §5 / §10:** timestamp tokens must be verified against a trusted TSA certificate;
-"fail closed" means an unverified token is not `VERIFIED`.
-**Symptom:** `longterm/timestamps.py` parses the token (imprint, genTime) and verifies
-via OpenSSL TS verify when a TSA certificate or CA bundle is available. Added offline queueing (§10).
-**Status:** **Fixed / Partial** — OpenSSL verification path added; local test TSA with native PQ ML-DSA is primary dev verification.
-
+**SPEC §5 / §10:** timestamp tokens must be verified against a trusted TSA certificate.
+**Status:** **Fixed** (2026-10-07) — `longterm/timestamps.py` verifies with `openssl ts -verify` against `Trust.tsa_ca_file` at the token's
+genTime; no CA file or no openssl means unverified (fail closed). Unreachable TSA queues a token (`evseal stamp-queue` flushes it; the
+verifier reports the delay). Tests: `tests/test_rfc3161.py` (real openssl-built TSA, wrong-CA rejection, queue + flush).
+Remaining limit: conventional TSAs sign with classical RSA/ECDSA (disclosed in the court report).
 ---
 
 ## D5 — Custody log not wired into verifier
@@ -60,46 +54,23 @@ hash-chain and actor signatures under `trust.roots`, surfacing any discrepancies
 
 ---
 
-## D6 — Unit timestamp metadata is unsigned (for attack 11 detection)
+## D6 — Unit timestamp metadata was unsigned
 
-**SPEC §2:** all `R_i` and `C_i` are signed; unit `t` (wall-clock timestamp) is unsigned metadata.
-**Symptom:** An attacker can change the `t` field in `manifest.json` without breaking any
-signature. Attack 11 (sign period q with period p's leaked key) is caught by the validity-window
-check (cert `valid_from..valid_until` vs the signed period boundary), NOT by checking `t`.
-The validity-window defence is real and tested (see `attack11_leaked_key_long` scenario).
-**Status:** Documented — NOT fixing in §2. This is the correct design: the cert validity window
-is the cryptographic defence; `t` is advisory context for the UI.
-**Note:** Adding `t` to the signed payload would require a §2 change — stop and ask first.
-
+**Status:** **Fixed** (2026-10-07, owner-approved SPEC amendment A1) — bundle format v2 signs `[t, dur]` per unit inside the block
+signature; the verifier flags any manifest/signed mismatch as `TAMPERED` and uses the signed `t` for the key validity window. v1 bundles still verify.
+Tests: `test_unit_time_is_signed_edit_is_detected`, `test_v1_bundle_without_signed_times_still_verifies`.
 ---
 
 ## D7 — MP4 clip preview: sparse file the size of the original
 
-**media/common.py ponytail:** the clip's `moov` still has stco/co64 offsets relative to the
-full original file; the clip is opened as a sparse file the full original size.
-**Status:** **Fixed** — `_rewrite_mp4_offsets()` in `media/common.py` dynamically adjusts `stco`
-and `co64` chunk offset boxes in the clip's `moov` header by the data delta shift, so clip previews
-are compact without creating sparse files.
-
+**Status:** **Fixed** (2026-10-07) — `media/common.py::_rewrite_mp4_offsets` rewrites stco/co64 offsets and the mdat size in a compact copy.
+Test: `test_mp4_clip_preview_is_compact_not_sparse` plus the existing clip/ffprobe tests.
 ---
 
-## D8 — Protocol additions pending approval (Step 3 items)
+## D8 — Protocol additions
 
-The following were implemented without explicit protocol approval. Proposed as a SPEC.md diff —
-**waiting for user approval before any of these become canon:**
-
-1. **Domain tags on gap/cert/reseal messages** — signed messages for those record types have
-   a leading domain-separator string (e.g. `"evseal-v1-gap"`) not in §2.
-2. **AEAD chunk nonce = n_i XOR chunk_index** — single-chunk units use the bare `n_i`
-   (matching SPEC formula); multi-chunk units XOR the chunk index in. Confirm this is canonical.
-3. **New profile knobs added:** `segment.assumed_fps`, `image.likely_edited_threshold`,
-   `aead.chunk` (segment | frame), `image.aead_chunk_kb = 64` (the "TBD" from §4).
-4. **`perceptual_hash = thumb8`** — the §4 "TBD" algorithm choice is implemented as an
-   RGB 8×8 thumbnail average-hash. Confirm this is the chosen algorithm.
-
-*These are tracked here to avoid silent protocol drift. None of these change the core §2
-chain/signing/AEAD/RS mechanics.*
-
+**Status:** **Approved** (2026-10-07) and recorded in SPEC §14 (A2). Domain tags, chunk nonce rule, profile knobs (incl. `segment.max_unit_mb`),
+thumb8 perceptual hash.
 ---
 
 ## P5, P6, and §10 Implementation Status (All Green)
@@ -121,3 +92,22 @@ chain/signing/AEAD/RS mechanics.*
 - **End-to-End Testing from Live UI / API:**
   - `tests/test_e2e_api.py`: 11 live HTTP end-to-end integration tests covering Doctor -> Keygen -> Profile -> Upload -> Seal (SSE) -> Verify -> Clip & Open -> Tamper & Repair -> DR Split & Recover -> Stress Lab -> Benchmarks -> Static UI.
   - Entire test suite: **146 passed, 0 failures, 2 skipped** (144 fast + 2 slow).
+
+---
+
+## Audit hardening (2026-10-07)
+
+- Verifier: any exception on hostile input is `REJECTED` (bad zip, huge sizes); tile buffers capped by real file size.
+- Seal: refuses non-monotonic unit time across key periods, refuses without a timestamp source, refuses the DEV-ONLY backend
+  (override `EVSEAL_ALLOW_DEV_CRYPTO=1`), ephemeral cert window now `rotation_s + 1 day`, `Trust.slack_s` is verifier policy.
+- Revocation is judged against verified timestamp proof of signing time (SPEC §14 A4).
+- Profile evolution: `profile.OPTIONAL` keeps old bundles verifiable when knobs are added (A3).
+- `evseal-verify` (argparse only) and `evseal report` (draft s.63 / FRE 902 certificate) added.
+
+## Access management and non-repudiation (2026-10-07, SPEC §14 A6–A8)
+
+- Roles and signed identities: `evseal/access.py` (signed hash-chained directory), CLI `user-init|user-add|user-role|user-revoke|users|access-log`, `--as USER` on seal, clip, open, repair, reseal, dr-*, report.
+- API: key-based login, live role checks, signed intent in `access.log` before each privileged action, throttled logins, `EVSEAL_AUTH=off` dev switch (non-loopback serve refused with it).
+- Bundles: operator `seal` attestation bound to the final seal; `Trust.require_operator` policy; `evseal verify --require-operator`.
+- External signer interface and hybrid (classical + PQ) timestamps added.
+- Accepted limits: with a file key the API server holds the unlocked key for a session (custodial in memory); use an external signer for client-side non-repudiation. The access log is one local file (a truncated tail is not detectable without an external anchor).

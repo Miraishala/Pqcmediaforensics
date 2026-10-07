@@ -118,7 +118,8 @@ def test_roundtrip_bitexact(lab, tmp_path, fmt):
 def test_clip_standalone_verify(lab, tmp_path, fmt):
     """Make a clip of units 2..3; verify it standalone; expect VERIFIED."""
     p = make_media(fmt, lab["media"])
-    bundle, rep, _ = _seal_and_verify(lab, p, tmp_path)
+    raw = {"segment": {"assumed_fps": 10.0}} if fmt in ("h264", "h265") else None  # raw streams carry no timing
+    bundle, rep, _ = _seal_and_verify(lab, p, tmp_path, raw)
     # find 2nd and 3rd data units
     data_units = sorted(u.i for u in rep.units if u.role == "data")
     if len(data_units) < 3:

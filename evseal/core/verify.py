@@ -28,7 +28,7 @@ from evseal.core.aead import TagMismatch, aad, open_chunk
 from evseal.core.chain import chain_init, chain_step
 from evseal.core.hashing import dual_hash
 from evseal.core.kdf import derive_key_nonce
-from evseal.core.manifest import (Bundle, block_msg, checkpoint_msg, final_msg, gap_msg, hexb, jcs, manifest_hash,
+from evseal.core.manifest import (FORMAT, Bundle, block_msg, checkpoint_msg, final_msg, gap_msg, hexb, jcs, manifest_hash,
                                   reseal_msg, seg_name)
 from evseal.core.profile import profile_hash, validate
 from evseal.core.tilemerkle import merkle_root
@@ -100,15 +100,22 @@ class _Reject(Exception):
     pass
 
 
-def _tst_ok(rep: Report, label: str, rec: dict, msg: bytes, cert: dict | None, trust: keys.Trust, require: bool) -> None:
+def _tst_ok(rep: Report, label: str, rec: dict, msg: bytes, cert: dict | None, trust: keys.Trust, require: bool) -> float | None:
+    """Check a record's timestamp tokens; return the earliest verified token time (None if none verified)."""
     toks = rec.get("tst") or []
     if require and not toks:
         rep.check(f"{label} timestamp", False, "no timestamp token")
+    times: list[float] = []
     for tok in toks:
         ok, t, detail = verify_token(tok, msg, trust)
         rep.check(f"{label} timestamp", ok, detail, info=detail)
-        if ok and cert is not None and t is not None and not (cert["not_before"] - SLACK_S <= t <= cert["not_after"] + SLACK_S):
-            rep.check(f"{label} timestamp window", False, "timestamp outside the signing key's validity (backdated?)")
+        if ok and t is not None:
+            times.append(t)
+        if ok and cert is not None and t is not None and not (cert["not_before"] - trust.slack_s <= t <= cert["not_after"] + trust.slack_s):
+            off = t - cert["not_before"] if t < cert["not_before"] else t - cert["not_after"]
+            rep.check(f"{label} timestamp window", False,
+                      f"timestamp {off:+.0f}s outside the signing key's validity (backdated, or clock step; widen trust slack_s to accept)")
+    return min(times) if times else None
 
 
 class _Opener:
@@ -222,7 +229,10 @@ class _Opener:
         detail = ("segment file missing" if seg_missing else f"AEAD tag failed on chunk(s) {bad}") if bad else ""
         if repaired:
             detail = f"rebuilt chunk(s) {repaired} from {'/'.join(sorted(how))}" + (f"; {detail}" if detail else "")
-        partial = b"".join(parts[c] if parts[c] else b"\x00" * u["chunks"][c] for c in range(len(u["chunks"])))
+        partial = None
+        if bad and "tiles" in u:  # zero-filled plaintext for the per-tile map; sizes capped by the real file
+            seg_len = len(self.seg(i) or b"")
+            partial = b"".join(parts[c] if parts[c] else b"\x00" * min(u["chunks"][c], seg_len) for c in range(len(u["chunks"])))
         return (None if bad else b"".join(parts)), repaired, bad, detail, partial
 
     def misplaced(self, i: int) -> int | None:
@@ -247,13 +257,13 @@ def verify(path: Path, trust: keys.Trust, *, repair: bool = True, replicas: tupl
            tile_maps: bool = True) -> Report:
     """Verify a bundle or clip. `sink(i, plaintext, unit_result)` receives each VERIFIED/REPAIRED unit in order."""
     rep = Report()
-    b = Bundle(Path(path))
     try:
+        b = Bundle(Path(path))
         _verify(rep, b, trust, repair, [Bundle(Path(r)) for r in replicas], sink, tile_maps)
     except _Reject:
         rep.overall = "REJECTED"
         return rep
-    except (KeyError, ValueError, TypeError, AttributeError, IndexError) as exc:  # malformed manifest: trust boundary
+    except Exception as exc:  # trust boundary: any parse/IO/alloc failure on hostile input is a rejection, never a crash
         rep.reasons.append(f"malformed manifest: {type(exc).__name__}: {exc}")
         rep.overall = "REJECTED"
         return rep
@@ -316,23 +326,28 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
     conflict: set[int] = set()
     bad_sig: dict[int, str] = {}
     max_period = -1
+    v2 = m.get("format") == FORMAT
+    signed_t: dict[int, tuple[float, float]] = {}
     alg_c = profile["hash"]["chain"]
     for blk in sorted((r for r in records if r.get("type") == "block"), key=lambda r: r.get("i_start", 0)):
         a, z = int(blk["i_start"]), int(blk["i_end"])
         rs, cs = [hexb(x) for x in blk["R"]], [hexb(x) for x in blk["C"]]
         cert = eph.get(blk.get("cert"))
         why = ""
+        tt = blk.get("T") if v2 else None  # format v2: signed [t, dur] per unit (D6)
         if a < 1 or z < a or len(rs) != z - a + 1 or len(cs) != z - a + 1:
             why = "malformed block"
+        elif v2 and not (isinstance(tt, list) and len(tt) == z - a + 1 and all(isinstance(x, list) and len(x) == 2 for x in tt)):
+            why = "malformed block: signed unit times missing"
         elif cert is None:
             why = "block signed by an unknown or invalid certificate"
-        elif not crypto.verify(cert["alg"], hexb(cert["pk"]), block_msg(rid, a, z, rs, cs), hexb(blk["sig"])):
+        elif not crypto.verify(cert["alg"], hexb(cert["pk"]), block_msg(rid, a, z, rs, cs, tt), hexb(blk["sig"])):
             why = "block signature invalid (forged, edited or replayed at another index)"
         elif cert["period"] < max_period:
             why = f"signed with period {cert['period']} key after period {max_period} (validity window)"
         else:
             for i in range(a, z + 1):
-                t = units_meta.get(i, {}).get("t", cert["t_from"])
+                t = tt[i - a][0] if v2 else units_meta.get(i, {}).get("t", cert["t_from"])
                 if not (cert["t_from"] <= t < cert["t_to"]):
                     why = f"unit {i} at t={t}s outside key validity window [{cert['t_from']}, {cert['t_to']})"
                     break
@@ -348,9 +363,12 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
                 conflict.add(i)
             signed[i] = (r_i, c_i)
             block_of[i] = view
+            if v2:
+                signed_t[i] = (tt[i - a][0], tt[i - a][1])
     rep.check("block signatures", bool(signed), "no valid block signature at all (stripped?)", fatal=True)
 
     # final seal, checkpoints, timestamps, anchors
+    marks: list[tuple[int, float]] = []  # (unit index covered, earliest verified timestamp): upper bounds on signing time
     finals = [r for r in records if r.get("type") == "final"]
     final_ok = False
     n_final = None
@@ -365,7 +383,9 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
                              "final seal signature/count/C_n check failed")
         if final_ok:
             n_final = int(f["n"])
-            _tst_ok(rep, "final seal", f, msg, cert, trust, require=True)
+            t_tok = _tst_ok(rep, "final seal", f, msg, cert, trust, require=True)
+            if t_tok is not None:
+                marks.append((n_final, t_tok))
         rep.final = {k: v for k, v in f.items() if k != "sig"} | {"valid": final_ok}
     ck_cert = {cid: c for cid, c in certs.items() if c["role"] == "checkpoint"}
     last_ckpt = 0
@@ -378,7 +398,9 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
                        "checkpoint signature or chain value invalid")
         if ok:
             last_ckpt = max(last_ckpt, i)
-            _tst_ok(rep, f"checkpoint {i}", ck, msg, cert, trust, require=True)
+            t_tok = _tst_ok(rep, f"checkpoint {i}", ck, msg, cert, trust, require=True)
+            if t_tok is not None:
+                marks.append((i, t_tok))
         rep.checkpoints.append({k: v for k, v in ck.items() if k != "sig"} | {"valid": ok})
     if profile["anchors"]["backend"] == "local-log" and "clip" not in m:
         raw = b.read("anchors/anchors.jsonl")
@@ -406,6 +428,27 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
             _tst_ok(rep, f"reseal {k}", rs_rec, reseal_msg(mh, rs_rec), None, trust, require=False)
         rep.reseals.append({kk: v for kk, v in rs_rec.items() if kk != "sig"} | {"valid": ok})
 
+    # key revocation (SPEC §10): a revoked key's signatures stand only if a trusted timestamp proves they predate it
+    def bound(upto: int) -> float | None:
+        ts = [t for i, t in marks if i >= upto]
+        return min(ts) if ts else None
+
+    last_idx: dict[str, int] = {}
+    for i, v in block_of.items():
+        last_idx[v["cert"]] = max(last_idx.get(v["cert"], 0), i)
+    for ck in rep.checkpoints:
+        if ck["valid"]:
+            last_idx[ck["cert"]] = max(last_idx.get(ck["cert"], 0), int(ck["i"]))
+    if final_ok:
+        last_idx[finals[-1]["cert"]] = max(last_idx.get(finals[-1]["cert"], 0), n_final)
+    for who, fp, upto in [("root", root["fp"], 0)] + [(f"cert {cid}", crypto.fingerprint(hexb(c["pk"])), last_idx.get(cid, 0))
+                                                      for cid, c in certs.items()]:
+        if fp in revocations:
+            b_t = bound(upto)
+            rep.check(f"revocation {who}", b_t is not None and b_t < revocations[fp],
+                      f"key {fp[:12]} revoked at {revocations[fp]}; "
+                      + ("no trusted timestamp proves signing before revocation" if b_t is None else f"earliest proof of signing is {b_t}, not before revocation"))
+
     # custody log (SPEC §3.3, Deviation D5)
     raw_custody = b.read("custody.log")
     if raw_custody:
@@ -416,8 +459,20 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
             problems = custody.check(custody_recs, trust)
             rep.check("custody log", not problems, "; ".join(problems) if problems else "",
                       info=f"{len(custody_recs)} chained custody record(s) verified")
+            if not problems:
+                att = [r for r in custody_recs if r.get("action") == "seal"]
+                for r in att:  # operator attestation (non-repudiation): must match what the final seal covers
+                    d = r.get("detail", {})
+                    ok = finals and d.get("rid") == m["rid"] and d.get("n") == finals[-1]["n"] and d.get("C_n") == finals[-1]["C_n"] \
+                        and d.get("file_hash") == finals[-1]["file_hash"]
+                    rep.check("operator attestation", bool(ok), "seal attestation does not match this bundle's final seal",
+                              info=f"sealed by {d.get('user')} ({d.get('role')}), signed with {r.get('actor_alg')} key {str(r.get('actor_fp'))[:12]}")
+                if not att and trust.require_operator:
+                    rep.check("operator attestation", False, "no operator seal attestation (policy requires one)")
         except Exception as exc:
             rep.check("custody log", False, f"malformed custody log: {exc}")
+    elif trust.require_operator and "clip" not in m:
+        rep.check("operator attestation", False, "no operator seal attestation (policy requires one)")
 
     # 3. expected unit set
     clip = m.get("clip")
@@ -470,6 +525,12 @@ def _verify(rep: Report, b: Bundle, trust: keys.Trust, repair: bool, replicas: l
         if chain_step(i, r_s, c_prev, alg_c) != c_s:
             res.status, res.detail = "SEQUENCE_ERROR", "chain check C_i = Hc(i || R_i || C_{i-1}) failed"
             continue
+        if v2:
+            t_s, d_s = signed_t[i]
+            res.t, res.dur = t_s, d_s
+            if float(u.get("t", -1)) != float(t_s) or float(u.get("dur", -1)) != float(d_s):
+                res.status, res.detail = "TAMPERED", "unit time in the manifest differs from the signed time"
+                continue
         if u.get("role") == "gap":
             ok = gaps.get(i) == u.get("gap") and dual_hash(GAP_PREFIX + u["gap"].encode(), algs) == r_s
             res.status, res.detail = ("GAP_DECLARED", u["gap"]) if ok else ("SEQUENCE_ERROR", "gap without a valid signed gap record")

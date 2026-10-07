@@ -130,3 +130,42 @@ This audit evaluates critical failure vectors across the entire evidence lifecyc
 The architectural foundations of EviSeal (dual-hashing, strict unit index chaining, Reed–Solomon recovery, and native ML-DSA/ML-KEM quantum-resistant cryptography) are mathematically sound and resilient. 
 
 The primary risks do not stem from cryptographic breaks, but from **operational bitstream edge cases (audio PES cut alignment), unsigned presentation metadata under legal cross-examination, and offline field acquisition conditions**. Addressing these through the roadmap prioritized above will ensure unassailable evidentiary integrity.
+
+---
+
+## 7. Remediation status (2026-10-07, verified on native liboqs 0.16 in WSL2: full suite incl. slow, all green)
+
+| Finding | Status |
+|---|---|
+| Verifier crash on hostile input (bad zip, huge chunk length) | Fixed: any exception is `REJECTED` |
+| Backwards unit time makes a bundle unverifiable | Fixed: seal refuses with a clear error |
+| No timestamp source makes a bundle unverifiable | Fixed: seal refuses |
+| TSA clock vs key window | Fixed: window `rotation_s + 1 day`, `Trust.slack_s` policy, offset reported |
+| Real RFC 3161 never verifies; no offline queue (D4) | Fixed: `openssl ts -verify` + `stamp-queue` (classical TSA signatures remain a disclosed limit) |
+| Revocation judged against cert `not_before` | Fixed: judged against verified timestamp proof of signing time |
+| Unsigned unit time `t` (D6) | Fixed: format v2 signs `[t, dur]`; v1 bundles still verify (SPEC §14 A1) |
+| D1 audio PES straddle | Fixed for TS: clean-cut search; keyframe cut kept if none exists |
+| D7 sparse clip preview | Fixed: compact copy with rewritten offsets |
+| VFR / long-GOP huge units | Fixed: `segment.max_unit_mb` (default 64) |
+| Seal on DEV-ONLY backend | Fixed: refused unless `EVSEAL_ALLOW_DEV_CRYPTO=1` |
+| Root key plaintext on disk | Mitigated: passphrase-encrypted at rest (`EVSEAL_KEY_PASSPHRASE`); HSM/TPM still needed for hardware non-repudiation |
+| New profile knob breaks old bundles | Fixed: `profile.OPTIONAL` (SPEC §14 A3) |
+| Court report / s.63 draft; standalone `evseal-verify` | Added (`evseal report`, `evseal-verify`) |
+| Test seeds not reproducible; crash hook in production path; skipped raw H.264/5 tests | Fixed |
+| Benchmarks lacked environment, ran with tracemalloc, allowed fallback backend | Fixed |
+
+**Measured (WSL2, i5-10200H, liboqs 0.16.0, ML-DSA-44, 120 s synthetic TS at about 0.5 Mbps):** 7.8 to 9.5x real time; storage overhead 108 to 252 percent depending on profile.
+This is far above the SPEC §4 estimate of 10 to 20 percent. Cause: the per-unit cost (one ML-DSA signature of 2.4 KB plus R and C, stored as hex in
+three manifest copies) is fixed at about 17 KB per second of footage, so low-bitrate sources pay a large relative cost. `sign.block_segments` and
+`ec.k` are the levers (block=5 gave 108 percent). Open optimisation: binary or base64 signatures (a format change).
+
+**Remaining, outside what software alone can close:** HSM/TPM-held keys; a post-quantum TSA; a human custodian's signature on the s.63 certificate;
+Mode A cannot see pre-collection edits; loss beyond the parity budget is `CORRUPT`; cloud re-encoding can be detected but not prevented.
+
+### 7.1 Access and non-repudiation (added 2026-10-07)
+
+New finding: the API had no authentication, yet could delete bundles, create keys and tamper with copies, and `evseal serve --host` accepted any address.
+Fixed: key-based login, five roles, a signed hash-chained user directory, signed access log, operator seal attestation bound to the final seal,
+throttled logins, and a refusal to serve unauthenticated on a non-loopback address. Covered by `tests/test_access.py`, `tests/test_cli_access.py`,
+`tests/test_api_auth.py`. External signers (HSM/TPM-style) and a post-quantum timestamp witness were added alongside.
+Remaining: real HSM/TPM hardware, a PQ-capable public TSA, anchoring the access-log head externally, and a human custodian's signature on the court certificate.

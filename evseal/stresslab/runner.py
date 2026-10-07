@@ -160,7 +160,7 @@ class Lab:
             shutil.rmtree(work)
         prof_path = self.dir / f"{sc['id']}.toml"
         prof_path.write_text(prof.dumps(p))
-        env = dict(os.environ, EVSEAL_TEST_CRASH_AFTER_BLOCKS=str(sc["params"]["after_blocks"]), EVSEAL_HOME=str(self.ws.home))
+        env = dict(os.environ, EVSEAL_TEST_MODE="1", EVSEAL_TEST_CRASH_AFTER_BLOCKS=str(sc["params"]["after_blocks"]), EVSEAL_HOME=str(self.ws.home))
         code = (
             "import sys; from evseal.workspace import Workspace; from evseal.core import profile as P;"
             "from evseal.core.seal import seal_path; ws=Workspace();"

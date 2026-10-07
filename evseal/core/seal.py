@@ -135,6 +135,13 @@ def seal(source: SourceUnits, profile: dict, root: keys.KeyPair, out_dir: Path, 
          anchor_log: AnchorLog | None = None, progress=None) -> Path:
     profile = check(profile)
     progress = progress or (lambda *a: None)
+    if tsa is None and not profile["timestamps"]["tsa_urls"]:
+        # the verifier requires a token on every checkpoint and the final seal: fail now, not at verify time
+        raise ValueError("no timestamp source: pass a TSA or set timestamps.tsa_urls (the bundle would never verify)")
+    dev = [a for a in {profile["sign"]["alg"], profile["checkpoint"]["alg"], root.alg} if crypto.is_dev_only(a)]
+    if dev and os.environ.get("EVSEAL_ALLOW_DEV_CRYPTO") != "1":
+        raise RuntimeError(f"{', '.join(sorted(dev))} would run on the {crypto.DEV_ONLY_NOTE}. Build liboqs natively, "
+                           "or set EVSEAL_ALLOW_DEV_CRYPTO=1 for throwaway UI/dev data")
     out = Path(out_dir)
     if out.exists() and any(out.iterdir()):
         raise FileExistsError(f"{out} is not empty")
@@ -150,6 +157,15 @@ def seal(source: SourceUnits, profile: dict, root: keys.KeyPair, out_dir: Path, 
         if u.role == "trailer":
             u.t = end_t  # framing after the last sample belongs to the last period
     n = len(units)
+    rot = profile["keys"]["rotation_s"]
+    top = None
+    for i, u in enumerate(units, start=1):  # after the trailer fix-up above: framing units carry the end time
+        p = int(u.t // rot)
+        if top is not None and p < top:
+            raise ValueError(f"unit {i} starts at t={u.t}s, in an earlier key period than a previous unit "
+                             "(timestamps went backwards, e.g. PTS wrap or concatenated input): "
+                             "the bundle would fail verification")
+        top = p if top is None else max(top, p)
     w = profile["parallel"]["workers"]
     workers = (os.cpu_count() or 1) if w == "auto" else w
     chunks = [chunk_lengths(u, profile, kind) for u in units]
@@ -199,7 +215,7 @@ def seal(source: SourceUnits, profile: dict, root: keys.KeyPair, out_dir: Path, 
         eph: keys.KeyPair | None = None
         eph_cert: dict | None = None
         interval, last_bucket = profile["checkpoint"]["interval_s"], 0
-        crash_after = int(os.environ.get("EVSEAL_TEST_CRASH_AFTER_BLOCKS", "0"))  # test hook: simulated kill -9
+        crash_after = int(os.environ.get("EVSEAL_TEST_CRASH_AFTER_BLOCKS", "0")) if os.environ.get("EVSEAL_TEST_MODE") == "1" else 0  # test hook: simulated kill -9
         for b_no, blk in enumerate(blocks, start=1):
             p = int(units[blk[0] - 1].t // rot)
             if eph_cert is None or eph_cert["period"] != p:
@@ -208,7 +224,7 @@ def seal(source: SourceUnits, profile: dict, root: keys.KeyPair, out_dir: Path, 
                 eph = keys.generate(profile["sign"]["alg"], f"eph-{p}")
                 t0 = time.time()
                 eph_cert = keys.issue_cert(root, cert_id=f"eph-{p}", role="ephemeral", subject=eph, rid=rid, profile_hash=ph,
-                                           period=p, t_from=float(p * rot), t_to=float((p + 1) * rot), not_before=t0, not_after=t0 + rot)
+                                           period=p, t_from=float(p * rot), t_to=float((p + 1) * rot), not_before=t0, not_after=t0 + rot + 86400)  # a slow seal may outlive the period
                 emit([eph_cert])
             cts = list(ex.map(lambda i: _encrypt(units[i - 1], i, cs[i], rid, chunks[i - 1], profile), blk))  # stage 3 ∥
             batch = []
@@ -226,9 +242,10 @@ def seal(source: SourceUnits, profile: dict, root: keys.KeyPair, out_dir: Path, 
                 if u.role == "gap":
                     batch.append({"type": "gap", "i_start": i, "i_end": i, "reason": u.gap_reason, "cert": eph_cert["id"],
                                   "sig": eph.sign(gap_msg(rid, i, i, u.gap_reason)).hex()})
-            sig = eph.sign(block_msg(rid, blk[0], blk[-1], [rs[i - 1] for i in blk], [cs[i] for i in blk]))
+            tt = [[units[i - 1].t, units[i - 1].dur] for i in blk]  # unit times are signed (format v2, D6)
+            sig = eph.sign(block_msg(rid, blk[0], blk[-1], [rs[i - 1] for i in blk], [cs[i] for i in blk], tt))
             batch.append({"type": "block", "i_start": blk[0], "i_end": blk[-1], "R": [rs[i - 1].hex() for i in blk],
-                          "C": [cs[i].hex() for i in blk], "cert": eph_cert["id"], "sig": sig.hex()})
+                          "C": [cs[i].hex() for i in blk], "T": tt, "cert": eph_cert["id"], "sig": sig.hex()})
             last = units[blk[-1] - 1]
             bucket = int((last.t + last.dur) // interval)
             if bucket > last_bucket and blk[-1] < n:
